@@ -79,9 +79,16 @@ func (r *room) handleLeave(c *Conn) {
 	r.mu.Unlock()
 	r.emit(c, NewMessage(r.Name, "member_left", "", "", []byte(c.ID)))
 	if empty {
-		r.stopOnce.Do(func() {
-			close(r.stop)
-		})
+		hub.mu.Lock()
+		r.mu.Lock()
+		if len(r.members) == 0 && len(r.register) == 0 {
+			delete(hub.rooms, r.Name)
+			r.stopOnce.Do(func() {
+				close(r.stop)
+			})
+		}
+		r.mu.Unlock()
+		hub.mu.Unlock()
 	}
 }
 
@@ -96,8 +103,14 @@ func (r *room) run() {
 		case msg := <-r.send:
 			r.broadcast(msg)
 		case <-r.stop:
-			hub.removeRoom(r.Name)
-			return
+			for {
+				select {
+				case msg := <-r.send:
+					r.broadcast(msg)
+				default:
+					return
+				}
+			}
 		}
 	}
 }

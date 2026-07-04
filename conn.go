@@ -18,6 +18,7 @@ type Conn struct {
 	send        chan []byte       // Outbound message queue
 	socket      *websocket.Conn
 	cleanupOnce sync.Once // Ensures cleanup happens only once
+	done        chan struct{}
 }
 
 const (
@@ -39,12 +40,17 @@ var (
 // TrySend attempts to send a message; drops it if the send buffer is full or closed.
 func (c *Conn) TrySend(msg []byte) bool {
 	select {
-	case c.send <- msg:
-		return true
-	default:
-		log.Printf("Conn %s: dropped message (slow or closed)", c.ID)
-		c.cleanup()
+	case <-c.done:
 		return false
+	default:
+		select {
+		case c.send <- msg:
+			return true
+		default:
+			log.Printf("Conn %s: dropped message (slow or closed)", c.ID)
+			c.cleanup()
+			return false
+		}
 	}
 }
 
@@ -106,7 +112,7 @@ func (c *Conn) cleanup() {
 		hub.leaveAllRooms(c)
 		hub.removeConn(c.ID)
 		c.socket.Close()
-		close(c.send)
+		close(c.done)
 	})
 }
 
@@ -148,14 +154,13 @@ func (c *Conn) writePump() {
 	}()
 	for {
 		select {
-		case msg, ok := <-c.send:
-			if !ok {
-				c.write(websocket.CloseMessage, []byte{})
-				return
-			}
+		case msg := <-c.send:
 			if err := c.write(websocket.BinaryMessage, msg); err != nil {
 				return
 			}
+		case <-c.done:
+			c.write(websocket.CloseMessage, []byte{})
+			return
 		case <-ticker.C:
 			if err := c.write(websocket.PingMessage, []byte{}); err != nil {
 				return
@@ -180,5 +185,6 @@ func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]str
 		Claims: claims,
 		socket: sock,
 		send:   make(chan []byte, 256),
+		done:   make(chan struct{}),
 	}
 }
