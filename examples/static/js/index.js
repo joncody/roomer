@@ -1,23 +1,28 @@
-"use strict";
+import roomer from "/src/roomer.js";
 
-import roomer from "./roomer.js";
-
-const decoder = new TextDecoder();
+const decoder = new TextDecoder("utf-8");
 const root = roomer("ws://localhost:8080/ws");
 
-root.on("open", () => {
-    console.log("Joined Lobby! My ID:", root.id());
-	const lobby = root.join("lobby");
-	lobby.on("open", () => {
-		lobby.send("chat", "Hello room!");
-	});
-	lobby.on("chat", (payload, senderId) => {
-		console.log(`${senderId}: ${decoder.decode(payload)}`);
-	});
-	lobby.on("new_member", (id) => {
-        console.log(`User joined: ${id}`);
-	});
-    lobby.on("member_left", (id) => {
-        console.log(`User left: ${id}`);
+root.on("open", function () {
+    console.log("Joined root room. Client ID: " + root.id());
+
+    const lobby = root.join("lobby");
+
+    lobby.on("open", function () {
+        console.log("Joined lobby channel!");
+        lobby.send("chat", "Hello room!");
+    });
+
+    lobby.on("chat", function (payload, sender_id) {
+        const text = decoder.decode(payload);
+        console.log("[" + sender_id + "]: " + text);
+    });
+
+    lobby.on("new_member", function (id) {
+        console.log("User joined: " + id);
+    });
+
+    lobby.on("member_left", function (id) {
+        console.log("User left: " + id);
     });
 });

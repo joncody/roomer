@@ -1,0 +1,63 @@
+@import "reset.css";
+
+body {
+    font-family: system-ui, -apple-system, monospace;
+    background-color: #0f111a;
+    color: #e0e0e0;
+    padding: 32px;
+    max-width: 900px;
+    margin: 0 auto;
+}
+h1 {
+    border-bottom: 2px solid #2a2d3d;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+    font-size: 1.8rem;
+}
+#summary {
+    background-color: #1a1d2d;
+    border: 1px solid #2a2d3d;
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 24px;
+    font-size: 1.1rem;
+}
+.summary-pass {
+    color: #4caf50;
+    font-weight: bold;
+}
+.summary-fail {
+    color: #f44336;
+    font-weight: bold;
+}
+.test-group {
+    margin-bottom: 24px;
+    background-color: #141622;
+    border: 1px solid #222536;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.group-header {
+    background-color: #1d2030;
+    padding: 10px 16px;
+    font-weight: bold;
+    font-size: 1rem;
+    color: #82aaff;
+    border-bottom: 1px solid #222536;
+}
+.group-body {
+    padding: 12px 16px;
+}
+.log-entry {
+    margin: 4px 0;
+    font-family: monospace;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+.pass {
+    color: #4caf50;
+}
+.fail {
+    color: #f44336;
+    font-weight: bold;
+}

@@ -2,20 +2,22 @@
 
 A lightweight, high-performance WebSocket framework for real-time applications in Go (server) and JavaScript (client). Built around **rooms**, **binary framing**, and **explicit message routing**, `roomer` handles connection lifecycle, room membership, and concurrency so you don’t have to.
 
+> 📦 **Zero external dependencies** • ⚡ **Binary packet framing** • 🌲 **Formal TLA+ spec**
+
 ---
 
 ## ✅ Key Features
 
-- 🏢 **Automatic Room Management**: Create/join/leave rooms on demand.
+- 🏢 **Automatic Room Management**: Create, join, and leave rooms on demand.
 - ⚡ **Efficient Binary Protocol**: Uses length-prefixed fields for compact, fast message encoding.
 - 📨 **Flexible Messaging**:
   - Broadcast to rooms (excluding sender)
   - Send direct messages to peers
-  - **Send private messages to self** via `TrySend`
+  - Send private messages to self via `TrySend`
 - 🔒 **Concurrency-Safe**: Thread-safe rooms and hub using Go’s `sync` primitives.
 - 🧩 **Handler Registration**: Register per-event logic on the server with `RegisterHandler`.
 - 🌐 **Single Root Connection**: Clients start in a `"root"` room and dynamically join others.
-- 📦 **Minimal Dependencies**: Only `gorilla/websocket` (Go) and standard JS.
+- 🧪 **Formal Verification**: Includes TLA+ specification (`spec/roomer.tla`) proving protocol safety.
 
 ---
 
@@ -27,10 +29,10 @@ go get github.com/joncody/roomer
 ```
 
 ### JavaScript Client
-Include these files in your frontend:
-- `roomer.js`
-- `bytecursor.js` (for binary parsing)
-- `emitter.js` (optional, if using event emitter pattern)
+Include these files from `src/` in your frontend:
+- `src/roomer.js`
+- `src/bytecursor.js` (binary parsing)
+- `src/emitter.js` (event subscription)
 
 ```js
 import roomer from './roomer.js';
@@ -69,27 +71,30 @@ func main() {
 
 ### 2. JavaScript Client
 ```js
-"use strict";
-
 import roomer from "./roomer.js";
 
-const decoder = new TextDecoder();
+const decoder = new TextDecoder("utf-8");
 const root = roomer("ws://localhost:8080/ws");
 
-root.on("open", () => {
-    console.log("Connected! My ID:", root.id());
-	const lobby = root.join("lobby");
-	lobby.on("open", () => {
-		lobby.send("ping", new Uint8Array());
-	});
-	lobby.on("pong", (payload, senderId) => {
-		console.log("Received pong from", senderId);
-	});
-	lobby.on("new_member", (id) => {
-        console.log(`User joined: ${id}`);
-	});
-    lobby.on("member_left", (id) => {
-        console.log(`User left: ${id}`);
+root.on("open", function () {
+    console.log("Connected! My ID: " + root.id());
+
+    const lobby = root.join("lobby");
+
+    lobby.on("open", function () {
+        lobby.send("ping", new Uint8Array(0));
+    });
+
+    lobby.on("pong", function (payload, sender_id) {
+        console.log("Received pong from " + sender_id);
+    });
+
+    lobby.on("new_member", function (id) {
+        console.log("User joined: " + id);
+    });
+
+    lobby.on("member_left", function (id) {
+        console.log("User left: " + id);
     });
 });
 ```
@@ -102,17 +107,19 @@ root.on("open", () => {
 ```js
 const root = roomer("ws://...");
 ```
-Returns the `root` room. All other rooms are created via `.join()`.
+Returns the `"root"` room. All other rooms are created via `.join()`.
 
 ### Room Methods
 | Method | Description |
 |--------|-------------|
-| `.join(name)` | Joins a room; returns a frozen `Room` object. |
-| `.leave()` | Leaves the room and cleans up listeners. |
+| `.clearListeners([exceptions])` | Removes registered event listeners except those listed in `exceptions`. |
+| `.forceClose()` | Forcefully closes the room locally and clears state. |
+| `.id()` | Returns your assigned client ID in this room. |
+| `.join(name)` | Joins a room; returns a room client instance. |
+| `.leave()` | Leaves the room and cleans up. |
+| `.members()` | Returns a copy array of current member IDs. |
+| `.open()` | `true` if the room connection is active. |
 | `.send(event, payload, [dst])` | Sends a message (to room or direct to `dst`). |
-| `.open()` | `true` if the room is active. |
-| `.members()` | Returns a deep copy of current member IDs. |
-| `.id()` | Returns your client ID in this room. |
 
 ### Events
 Use `.on(event, handler)` to listen:
@@ -122,7 +129,7 @@ Use `.on(event, handler)` to listen:
 - `"member_left"` — `(memberId)` when someone leaves
 - Custom events (e.g., `"chat"`) — `(payload, senderId)`
 
-> ⚠️ Reserved event names (`join`, `leave`, `join_ack`, etc.) cannot be used for custom messages.
+> ⚠️ Reserved event names (`join`, `leave`, `join_ack`, `leave_ack`, `open`, `close`, `new_member`, `member_left`) cannot be used for custom messages.
 
 ---
 
@@ -134,22 +141,20 @@ Use `.on(event, handler)` to listen:
 | `RegisterHandler(event string, handler func(*Conn, *Message) error)` | Registers a custom message handler. Returns error if duplicate or invalid. |
 | `SocketHandler(auth Authorize)` | Returns an `http.HandlerFunc`. Optional `auth` function extracts claims from request. |
 
-### `*Conn` Methods
-| Method | Description |
+### `*Conn` Methods & Fields
+| Method / Field | Description |
 |--------|-------------|
-| `SendToRoom(room, event string, payload []byte)` | Broadcasts to all room members **except sender**. |
-| `SendToClient(dstID, event string, payload []byte)` | Sends direct message to another client (uses `"root"` room internally). |
-| `TrySend(msg []byte) bool` | **Sends a message to self** (e.g., acks, replies). Non-blocking; returns `false` if client is slow/disconnected. |
-| `ID` | Unique connection UUID (read-only field). |
-| `Claims` | Map of auth claims (e.g., from JWT). |
+| `c.SendToRoom(room, event string, payload []byte)` | Broadcasts to all room members **except sender**. |
+| `c.SendToClient(dstID, event string, payload []byte)` | Sends direct message to another client (uses `"root"` room internally). |
+| `c.TrySend(msg []byte) bool` | **Sends a message to self** (e.g., acks, replies). Non-blocking; returns `false` if client is slow or closed. |
+| `c.ID` | Unique connection UUID string (read-only field). |
+| `c.Claims` | Map of auth claims (e.g., from JWT / HTTP request). |
 
 ### Message Utilities
 | Function | Description |
 |--------|-------------|
-| `NewMessage(room, event, dst, src string, payload []byte) *Message` | Builds a message struct. |
-| `BytesToMessage([]byte) *Message` | Decodes binary message (used internally). |
-
-> The server **automatically** handles `"join"`/`"leave"` events. Custom events are routed to registered handlers or broadcast if unhandled.
+| `NewMessage(room, event, dst, src string, payload []byte) *Message` | Builds a message struct with computed length fields. |
+| `BytesToMessage([]byte) *Message` | Decodes binary message bytes into a `*Message` struct. |
 
 ---
 
@@ -166,7 +171,7 @@ Each message is a sequence of **length-prefixed** fields (big-endian `uint32`):
 Example:  
 `[4][lobby][4][chat][0][][36][abc...][11][Hello room!]`
 
-> Clients must send/receive **binary WebSocket frames**, not text.
+> Clients send/receive **binary WebSocket frames** (`arraybuffer`).
 
 ---
 
@@ -177,6 +182,23 @@ Example:
 - **Non-blocking sends**: `TrySend` and internal messaging never block.
 - Rooms auto-clean when empty.
 - Malformed or oversized messages are dropped.
+
+---
+
+## 🧪 Testing & Formal Verification
+
+This library includes a zero-dependency, comprehensive browser-based verification suite for the client, along with a formal TLA+ specification for the server protocol.
+
+To run the client test suite:
+
+1. Start the Go example server (`go run examples/main.go`).
+2. Open `tests/index.html` in your browser (e.g., `http://localhost:8080/tests/index.html`).
+3. View results visually on the page or open Developer Tools (`F12` -> **Console**).
+
+To run the TLA+ model checker:
+```bash
+tlc spec/roomer.tla
+```
 
 ---
 
