@@ -25,11 +25,15 @@
 //            return nil
 //        })
 //
-//   2. Mount the WebSocket handler with optional authentication:
-//        http.Handle("/ws", roomer.SocketHandler(func(r *http.Request) (map[string]string, error) {
-//            // Extract JWT claims, session, etc.
-//            return claims, nil
-//        }))
+//   2. Mount the WebSocket handler with optional authentication and configuration options:
+//        http.Handle("/ws", roomer.SocketHandlerWithOptions(
+//            roomer.WithAuthorize(func(r *http.Request) (map[string]string, error) {
+//                // Extract JWT claims, session, etc.
+//                return claims, nil
+//            }),
+//            roomer.WithMaxMessageSize(8 * 1024 * 1024), // 8 MB max
+//            roomer.WithCheckOrigin(func(r *http.Request) bool { return true }),
+//        ))
 //
 //   3. Message Structure and Construction
 //

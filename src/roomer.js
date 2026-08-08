@@ -38,41 +38,54 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
         payload = "";
     }
 
+    const room_bytes = encoder.encode(room);
+    const event_bytes = encoder.encode(event);
+    const dst_bytes = encoder.encode(dst);
+    const src_bytes = encoder.encode(src);
+
+    let payload_bytes;
     let payload_len = 0;
+
     if (typeof payload === "string") {
-        payload_len = encoder.encode(payload).byteLength;
+        payload_bytes = encoder.encode(payload);
+        payload_len = payload_bytes.byteLength;
     } else if (
         typeof payload === "object" &&
         payload !== null &&
         typeof payload.byteLength === "number"
     ) {
-        payload_len = payload.byteLength;
+        payload_bytes = new Uint8Array(
+            payload.buffer || payload,
+            payload.byteOffset || 0,
+            payload.byteLength
+        );
+        payload_len = payload_bytes.byteLength;
+    } else {
+        payload_bytes = new Uint8Array(0);
     }
 
     const total_bytes = (
-        room.length +
-        event.length +
-        dst.length +
-        src.length +
+        room_bytes.byteLength +
+        event_bytes.byteLength +
+        dst_bytes.byteLength +
+        src_bytes.byteLength +
         payload_len +
         20
     );
 
     const data = bytecursor(new ArrayBuffer(total_bytes));
-    data.writeUint32(room.length);
-    data.writeString(room);
-    data.writeUint32(event.length);
-    data.writeString(event);
-    data.writeUint32(dst.length);
-    data.writeString(dst);
-    data.writeUint32(src.length);
-    data.writeString(src);
+    data.writeUint32(room_bytes.byteLength);
+    data.writeBytes(room_bytes);
+    data.writeUint32(event_bytes.byteLength);
+    data.writeBytes(event_bytes);
+    data.writeUint32(dst_bytes.byteLength);
+    data.writeBytes(dst_bytes);
+    data.writeUint32(src_bytes.byteLength);
+    data.writeBytes(src_bytes);
     data.writeUint32(payload_len);
 
-    if (typeof payload === "string") {
-        data.writeString(payload);
-    } else {
-        data.writeBytes(payload);
+    if (payload_len > 0) {
+        data.writeBytes(payload_bytes);
     }
 
     data.rewind();

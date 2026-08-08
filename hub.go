@@ -55,17 +55,19 @@ func (h *Hub) removeRoom(name string) {
 // joinRoom adds a connection to a room, creating the room if needed.
 func (h *Hub) joinRoom(name string, c *Conn) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	room, ok := h.rooms[name]
 	if !ok {
 		room = newRoom(name)
 		h.rooms[name] = room
 	}
+	h.mu.Unlock()
+	c.trackRoom(name)
 	room.join(c)
 }
 
 // leaveRoom removes a connection from a specific room.
 func (h *Hub) leaveRoom(name string, c *Conn) {
+	c.untrackRoom(name)
 	if room, ok := h.getRoom(name); ok {
 		room.leave(c)
 	}
@@ -73,15 +75,7 @@ func (h *Hub) leaveRoom(name string, c *Conn) {
 
 // leaveAllRooms removes a connection from every room it's in.
 func (h *Hub) leaveAllRooms(c *Conn) {
-	h.mu.RLock()
-	roomNames := make([]string, 0, len(h.rooms))
-	for name := range h.rooms {
-		roomNames = append(roomNames, name)
-	}
-	h.mu.RUnlock()
-	for _, name := range roomNames {
-		if room, ok := h.getRoom(name); ok {
-			room.leave(c)
-		}
+	for _, name := range c.joinedRooms() {
+		h.leaveRoom(name, c)
 	}
 }

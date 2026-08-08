@@ -74,6 +74,10 @@ func (r *room) handleJoin(c *Conn) {
 // handleLeave removes a connection and notifies others; stops room if empty.
 func (r *room) handleLeave(c *Conn) {
 	r.mu.Lock()
+	if _, exists := r.members[c.ID]; !exists {
+		r.mu.Unlock()
+		return
+	}
 	delete(r.members, c.ID)
 	empty := len(r.members) == 0
 	r.mu.Unlock()

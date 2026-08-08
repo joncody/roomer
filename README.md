@@ -1,4 +1,3 @@
-
 # `roomer` – Room-Based WebSocket Framework
 
 A lightweight, high-performance WebSocket framework for real-time applications in Go (server) and JavaScript (client). Built around **rooms**, **binary framing**, and **explicit message routing**, `roomer` handles connection lifecycle, room membership, and concurrency so you don’t have to.
@@ -18,7 +17,7 @@ A lightweight, high-performance WebSocket framework for real-time applications i
 - 🔒 **Concurrency-Safe**: Thread-safe rooms and hub using Go’s `sync` primitives.
 - 🧩 **Handler Registration**: Register per-event logic on the server with `RegisterHandler`.
 - 🌐 **Single Root Connection**: Clients start in a `"root"` room and dynamically join others.
-- 🌐 **Zero JS Dependencies**: Pure vanilla JavaScript for browser environments.
+- ⚙️ **Configurable Settings**: Custom limits for max message size, timeout deadlines, and WebSocket options.
 - 🧪 **Formal Verification**: Includes TLA+ specification (`spec/roomer.tla`) proving protocol safety.
 
 ---
@@ -29,10 +28,10 @@ A lightweight, high-performance WebSocket framework for real-time applications i
 ```bash
 go get github.com/joncody/roomer
 ```
-*Note: The server utilizes `github.com/gorilla/websocket` for WebSocket handling and `github.com/google/uuid` for connection identifiers.*
+*Note: The server relies on `github.com/gorilla/websocket` and `github.com/google/uuid`.*
 
 ### JavaScript Client
-Include these standalone files from `src/` in your frontend (no package manager or bundler required):
+Include these standalone files from `src/` in your frontend:
 - `src/roomer.js`
 - `src/bytecursor.js` (binary parsing)
 - `src/emitter.js` (event subscription)
@@ -67,7 +66,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	http.HandleFunc("/ws", roomer.SocketHandler(nil))
+	// Mount WebSocket handler with custom configuration
+	http.HandleFunc("/ws", roomer.SocketHandlerWithOptions(
+		roomer.WithMaxMessageSize(8 * 1024 * 1024), // 8MB limit
+	))
 	http.ListenAndServe(":8080", nil)
 }
 ```
@@ -124,25 +126,27 @@ Returns the `"root"` room. All other rooms are created via `.join()`.
 | `.open()` | `true` if the room connection is active. |
 | `.send(event, payload, [dst])` | Sends a message (to room or direct to `dst`). |
 
-### Events
-Use `.on(event, handler)` to listen:
-- `"open"` — room joined successfully
-- `"close"` — room left or connection closed
-- `"new_member"` — `(memberId)` when someone joins
-- `"member_left"` — `(memberId)` when someone leaves
-- Custom events (e.g., `"chat"`) — `(payload, senderId)`
-
-> ⚠️ Reserved event names (`join`, `leave`, `join_ack`, `leave_ack`, `open`, `close`, `new_member`, `member_left`) cannot be used for custom messages.
-
 ---
 
 ## 📚 Server API (`roomer` Go package)
 
-### Core Functions
+### Core Functions & Handlers
 | Function | Description |
 |--------|-------------|
-| `RegisterHandler(event string, handler func(*Conn, *Message) error)` | Registers a custom message handler. Returns error if duplicate or invalid. |
-| `SocketHandler(auth Authorize)` | Returns an `http.HandlerFunc`. Optional `auth` function extracts claims from request. |
+| `RegisterHandler(event string, handler MessageHandler)` | Registers a custom message handler. Returns error if duplicate or invalid. |
+| `SocketHandler(auth Authorize)` | Returns an `http.HandlerFunc` with default configuration options. |
+| `SocketHandlerWithOptions(opts ...Option)` | Returns an `http.HandlerFunc` configured via functional options. |
+
+### Functional Configuration Options (`Option`)
+| Option | Description |
+|--------|-------------|
+| `WithAuthorize(auth Authorize)` | Sets authorization function for HTTP upgrade requests. |
+| `WithMaxMessageSize(size int64)` | Sets maximum allowed inbound frame size in bytes. |
+| `WithWriteWait(d time.Duration)` | Sets write deadline for outbound frames. |
+| `WithPongWait(d time.Duration)` | Sets deadline for reading client pong responses. |
+| `WithPingPeriod(d time.Duration)` | Sets frequency for sending server ping frames. |
+| `WithCheckOrigin(check func(*http.Request) bool)` | Configures HTTP WebSocket handshake origin check. |
+| `WithBufferSizes(readSize, writeSize int)` | Sets upgrader read and write buffer sizes. |
 
 ### `*Conn` Methods & Fields
 | Method / Field | Description |
@@ -152,12 +156,6 @@ Use `.on(event, handler)` to listen:
 | `c.TrySend(msg []byte) bool` | **Sends a message to self** (e.g., acks, replies). Non-blocking; returns `false` if client is slow or closed. |
 | `c.ID` | Unique connection UUID string (read-only field). |
 | `c.Claims` | Map of auth claims (e.g., from JWT / HTTP request). |
-
-### Message Utilities
-| Function | Description |
-|--------|-------------|
-| `NewMessage(room, event, dst, src string, payload []byte) *Message` | Builds a message struct with computed length fields. |
-| `BytesToMessage([]byte) *Message` | Decodes binary message bytes into a `*Message` struct. |
 
 ---
 
@@ -174,34 +172,14 @@ Each message is a sequence of **length-prefixed** fields (big-endian `uint32`):
 Example:  
 `[4][lobby][4][chat][0][][36][abc...][11][Hello room!]`
 
-> Clients send/receive **binary WebSocket frames** (`arraybuffer`).
-
 ---
 
 ## 🛡️ Concurrency & Safety
 
 - All room operations are **goroutine-safe**.
-- Connections use buffered channels + ping/pong to prevent hangs.
-- **Non-blocking sends**: `TrySend` and internal messaging never block.
-- Rooms auto-clean when empty.
-- Malformed or oversized messages are dropped.
-
----
-
-## 🧪 Testing & Formal Verification
-
-This library includes a zero-dependency, comprehensive browser-based verification suite for the client, along with a formal TLA+ specification for the server protocol.
-
-To run the client test suite:
-
-1. Start the Go example server (`go run examples/main.go`).
-2. Open `tests/index.html` in your browser (e.g., `http://localhost:8080/tests/index.html`).
-3. View results visually on the page or open Developer Tools (`F12` -> **Console**).
-
-To run the TLA+ model checker:
-```bash
-tlc spec/roomer.tla
-```
+- Non-blocking sends: `TrySend` and internal messaging never block.
+- Per-connection room membership tracking guarantees clean unregisters upon disconnect.
+- Defensive binary parsing verifies frame bounds before advancing buffers.
 
 ---
 

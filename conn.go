@@ -19,23 +19,32 @@ type Conn struct {
 	socket      *websocket.Conn
 	cleanupOnce sync.Once // Ensures cleanup happens only once
 	done        chan struct{}
+	roomsMu     sync.RWMutex
+	rooms       map[string]struct{} // Set of joined room names
+	config      Config
 }
 
-const (
-	writeWait      = 10 * time.Second  // Time allowed to write a message to the peer
-	pongWait       = 60 * time.Second  // Time allowed to read next pong before idle timeout
-	pingPeriod     = pongWait * 9 / 10 // Send pings to peer with this period
-	maxMessageSize = 16 * 1024 * 1024  // Maximum message size allowed from peer
-)
+func (c *Conn) trackRoom(room string) {
+	c.roomsMu.Lock()
+	defer c.roomsMu.Unlock()
+	c.rooms[room] = struct{}{}
+}
 
-var (
-	// upgrader configures the WebSocket handshake with permissive origin policy.
-	upgrader = websocket.Upgrader{
-		ReadBufferSize:  4096,
-		WriteBufferSize: 4096,
-		CheckOrigin:     func(r *http.Request) bool { return true },
+func (c *Conn) untrackRoom(room string) {
+	c.roomsMu.Lock()
+	defer c.roomsMu.Unlock()
+	delete(c.rooms, room)
+}
+
+func (c *Conn) joinedRooms() []string {
+	c.roomsMu.RLock()
+	defer c.roomsMu.RUnlock()
+	rooms := make([]string, 0, len(c.rooms))
+	for r := range c.rooms {
+		rooms = append(rooms, r)
 	}
-)
+	return rooms
+}
 
 // TrySend attempts to send a message; drops it if the send buffer is full or closed.
 func (c *Conn) TrySend(msg []byte) bool {
@@ -119,10 +128,10 @@ func (c *Conn) cleanup() {
 // readPump reads messages from the WebSocket and dispatches them.
 func (c *Conn) readPump() {
 	defer c.cleanup()
-	c.socket.SetReadLimit(maxMessageSize)
-	c.socket.SetReadDeadline(time.Now().Add(pongWait))
+	c.socket.SetReadLimit(c.config.MaxMessageSize)
+	c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
 	c.socket.SetPongHandler(func(string) error {
-		c.socket.SetReadDeadline(time.Now().Add(pongWait))
+		c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
 		return nil
 	})
 	for {
@@ -141,13 +150,13 @@ func (c *Conn) readPump() {
 
 // write writes a message with a specified WebSocket message type and deadline.
 func (c *Conn) write(mt int, payload []byte) error {
-	c.socket.SetWriteDeadline(time.Now().Add(writeWait))
+	c.socket.SetWriteDeadline(time.Now().Add(c.config.WriteWait))
 	return c.socket.WriteMessage(mt, payload)
 }
 
 // writePump sends messages from the send channel and periodic pings.
 func (c *Conn) writePump() {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.config.PingPeriod)
 	defer func() {
 		ticker.Stop()
 		c.cleanup()
@@ -170,7 +179,12 @@ func (c *Conn) writePump() {
 }
 
 // newConnection upgrades an HTTP request to a WebSocket and initializes a Conn.
-func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]string) *Conn {
+func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]string, cfg Config) *Conn {
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  cfg.ReadBufferSize,
+		WriteBufferSize: cfg.WriteBufferSize,
+		CheckOrigin:     cfg.CheckOrigin,
+	}
 	sock, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return nil
@@ -186,5 +200,7 @@ func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]str
 		socket: sock,
 		send:   make(chan []byte, 256),
 		done:   make(chan struct{}),
+		rooms:  make(map[string]struct{}),
+		config: cfg,
 	}
 }
