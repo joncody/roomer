@@ -1,8 +1,9 @@
+
 # `roomer` – Room-Based WebSocket Framework
 
 A lightweight, high-performance WebSocket framework for real-time applications in Go (server) and JavaScript (client). Built around **rooms**, **binary framing**, and **explicit message routing**, `roomer` handles connection lifecycle, room membership, and concurrency so you don’t have to.
 
-> 📦 **Zero external dependencies** • ⚡ **Binary packet framing** • 🌲 **Formal TLA+ spec**
+> 📦 **Zero client dependencies** • ⚡ **Binary packet framing** • 🌲 **Formal TLA+ spec**
 
 ---
 
@@ -17,6 +18,7 @@ A lightweight, high-performance WebSocket framework for real-time applications i
 - 🔒 **Concurrency-Safe**: Thread-safe rooms and hub using Go’s `sync` primitives.
 - 🧩 **Handler Registration**: Register per-event logic on the server with `RegisterHandler`.
 - 🌐 **Single Root Connection**: Clients start in a `"root"` room and dynamically join others.
+- 🌐 **Zero JS Dependencies**: Pure vanilla JavaScript for browser environments.
 - 🧪 **Formal Verification**: Includes TLA+ specification (`spec/roomer.tla`) proving protocol safety.
 
 ---
@@ -27,9 +29,10 @@ A lightweight, high-performance WebSocket framework for real-time applications i
 ```bash
 go get github.com/joncody/roomer
 ```
+*Note: The server utilizes `github.com/gorilla/websocket` for WebSocket handling and `github.com/google/uuid` for connection identifiers.*
 
 ### JavaScript Client
-Include these files from `src/` in your frontend:
+Include these standalone files from `src/` in your frontend (no package manager or bundler required):
 - `src/roomer.js`
 - `src/bytecursor.js` (binary parsing)
 - `src/emitter.js` (event subscription)
