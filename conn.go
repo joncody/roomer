@@ -25,7 +25,7 @@ const (
 	writeWait      = 10 * time.Second  // Time allowed to write a message to the peer
 	pongWait       = 60 * time.Second  // Time allowed to read next pong before idle timeout
 	pingPeriod     = pongWait * 9 / 10 // Send pings to peer with this period
-	maxMessageSize = 65536             // Maximum message size allowed from peer
+	maxMessageSize = 16 * 1024 * 1024  // Maximum message size allowed from peer
 )
 
 var (
