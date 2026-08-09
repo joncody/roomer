@@ -70,6 +70,9 @@ func BytesToMessage(data []byte) *Message {
 	if msg.Payload, msg.PayloadLength, ok = readPayload(buf); !ok {
 		return nil
 	}
+	if buf.Len() != 0 {
+		return nil
+	}
 	return msg
 }
 

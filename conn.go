@@ -24,10 +24,21 @@ type Conn struct {
 	config      Config
 }
 
-func (c *Conn) trackRoom(room string) {
+func (c *Conn) trackRoom(room string) bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
 	c.roomsMu.Lock()
 	defer c.roomsMu.Unlock()
-	c.rooms[room] = struct{}{}
+	select {
+	case <-c.done:
+		return false
+	default:
+		c.rooms[room] = struct{}{}
+		return true
+	}
 }
 
 func (c *Conn) untrackRoom(room string) {
@@ -52,14 +63,16 @@ func (c *Conn) TrySend(msg []byte) bool {
 	case <-c.done:
 		return false
 	default:
-		select {
-		case c.send <- msg:
-			return true
-		default:
-			log.Printf("Conn %s: dropped message (slow or closed)", c.ID)
-			c.cleanup()
-			return false
-		}
+	}
+	select {
+	case <-c.done:
+		return false
+	case c.send <- msg:
+		return true
+	default:
+		log.Printf("Conn %s: dropped message (slow or closed)", c.ID)
+		c.cleanup()
+		return false
 	}
 }
 
@@ -81,6 +94,13 @@ func (c *Conn) SendToClient(dstID, event string, payload []byte) {
 
 // dispatch routes an incoming message to appropriate handlers or rooms.
 func (c *Conn) dispatch(msg *Message) {
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+	msg.Src = c.ID
+	msg.SrcLength = len(c.ID)
 	switch msg.Event {
 	case "join":
 		hub.joinRoom(msg.Room, c)
@@ -118,10 +138,10 @@ func (c *Conn) dispatch(msg *Message) {
 // cleanup safely removes the connection from all rooms and closes resources.
 func (c *Conn) cleanup() {
 	c.cleanupOnce.Do(func() {
+		close(c.done)
 		hub.leaveAllRooms(c)
 		hub.removeConn(c.ID)
 		c.socket.Close()
-		close(c.done)
 	})
 }
 

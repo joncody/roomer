@@ -15,6 +15,14 @@ const reserved_events = [
     "open"
 ];
 
+function is_array_buffer(value) {
+    return (
+        typeof value === "object" &&
+        value !== null &&
+        Object.prototype.toString.call(value) === "[object ArrayBuffer]"
+    );
+}
+
 function new_message(room_name, event_name, dst_id, src_id, payload_data) {
     let dst = dst_id;
     let event = event_name;
@@ -34,7 +42,7 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
     if (typeof src !== "string") {
         src = "";
     }
-    if (payload === undefined) {
+    if (payload === undefined || payload === null) {
         payload = "";
     }
 
@@ -49,16 +57,24 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
     if (typeof payload === "string") {
         payload_bytes = encoder.encode(payload);
         payload_len = payload_bytes.byteLength;
-    } else if (
-        typeof payload === "object" &&
-        payload !== null &&
-        typeof payload.byteLength === "number"
-    ) {
+    } else if (ArrayBuffer.isView(payload)) {
         payload_bytes = new Uint8Array(
-            payload.buffer || payload,
-            payload.byteOffset || 0,
+            payload.buffer,
+            payload.byteOffset,
             payload.byteLength
         );
+        payload_len = payload_bytes.byteLength;
+    } else if (is_array_buffer(payload)) {
+        payload_bytes = new Uint8Array(payload);
+        payload_len = payload_bytes.byteLength;
+    } else if (typeof payload === "object") {
+        payload_bytes = encoder.encode(JSON.stringify(payload));
+        payload_len = payload_bytes.byteLength;
+    } else if (
+        typeof payload === "number" ||
+        typeof payload === "boolean"
+    ) {
+        payload_bytes = encoder.encode(String(payload));
         payload_len = payload_bytes.byteLength;
     } else {
         payload_bytes = new Uint8Array(0);
@@ -160,7 +176,10 @@ function roomer(url) {
             if (is_open === false) {
                 throw new Error("Cannot leave: room is closed.");
             }
-            if (socket !== undefined) {
+            if (
+                socket !== undefined &&
+                socket.readyState === WebSocket.OPEN
+            ) {
                 socket.send(
                     new_message(
                         name,
@@ -183,14 +202,24 @@ function roomer(url) {
         }
 
         function parse(packet) {
-            let payload_text;
             let member_index;
+            let parsed;
+            let payload_text;
 
             switch (packet.event) {
             case "join_ack":
                 member_id = packet.src;
                 members.length = 0;
-                members.push(...JSON.parse(decoder.decode(packet.payload)));
+                try {
+                    parsed = JSON.parse(
+                        decoder.decode(packet.payload)
+                    );
+                    if (Array.isArray(parsed) === true) {
+                        members.push(...parsed);
+                    }
+                } catch (err) {
+                    parsed = null;
+                }
                 is_open = true;
                 self.emit("open");
                 break;
@@ -235,7 +264,10 @@ function roomer(url) {
             if (reserved_events.includes(event) === true) {
                 throw new Error("Reserved event: " + event);
             }
-            if (socket !== undefined) {
+            if (
+                socket !== undefined &&
+                socket.readyState === WebSocket.OPEN
+            ) {
                 socket.send(
                     new_message(name, event, dst, member_id, payload)
                 );
@@ -296,7 +328,11 @@ function roomer(url) {
 
         rooms[name] = self;
 
-        if (name !== "root" && socket !== undefined) {
+        if (
+            name !== "root" &&
+            socket !== undefined &&
+            socket.readyState === WebSocket.OPEN
+        ) {
             socket.send(
                 new_message(name, "join", member_id, member_id, member_id)
             );
@@ -310,25 +346,32 @@ function roomer(url) {
         socket.binaryType = "arraybuffer";
 
         socket.onmessage = function (e) {
-            const data = bytecursor(e.data);
-            const room_str = data.getString(data.getUint32());
-            const event_str = data.getString(data.getUint32());
-            const dst_str = data.getString(data.getUint32());
-            const src_str = data.getString(data.getUint32());
-            const payload_bytes = data.getBytes(data.getUint32());
+            try {
+                const data = bytecursor(e.data);
+                const room_str = data.getString(data.getUint32());
+                const event_str = data.getString(data.getUint32());
+                const dst_str = data.getString(data.getUint32());
+                const src_str = data.getString(data.getUint32());
+                const payload_bytes = data.getBytes(data.getUint32());
 
-            const packet = {
-                dst: dst_str,
-                event: event_str,
-                payload: payload_bytes,
-                room: room_str,
-                src: src_str
-            };
+                const packet = {
+                    dst: dst_str,
+                    event: event_str,
+                    payload: payload_bytes,
+                    room: room_str,
+                    src: src_str
+                };
 
-            if (rooms[packet.room] === undefined) {
-                return;
+                if (rooms[packet.room] === undefined) {
+                    return;
+                }
+                rooms[packet.room].parse(packet);
+            } catch (err) {
+                console.error(
+                    "Failed to parse incoming WebSocket message: ",
+                    err
+                );
             }
-            rooms[packet.room].parse(packet);
         };
 
         socket.onclose = function () {

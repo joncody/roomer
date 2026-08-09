@@ -1,6 +1,7 @@
 package roomer
 
 import (
+	"log"
 	"sync"
 )
 
@@ -12,29 +13,56 @@ type roomMessage struct {
 
 // room manages a group of connections with concurrent-safe operations.
 type room struct {
-	Name       string
-	members    map[string]*Conn
-	register   chan *Conn        // Channel to join the room
-	unregister chan *Conn        // Channel to leave the room
-	send       chan *roomMessage // Channel to broadcast messages
-	stop       chan struct{}     // Signal to terminate room if empty
-	stopOnce   sync.Once         // Ensures stop is only closed once
-	mu         sync.Mutex        // Protects member list
+	Name     string
+	members  map[string]*Conn
+	send     chan *roomMessage // Channel to broadcast messages
+	stop     chan struct{}     // Signal to terminate room if empty
+	stopOnce sync.Once         // Ensures stop is only closed once
+	mu       sync.Mutex        // Protects member list
 }
 
-// join queues a connection to join the room.
+// join adds a connection to the room and notifies others of new member.
 func (r *room) join(c *Conn) {
-	r.register <- c
+	r.mu.Lock()
+	r.members[c.ID] = c
+	r.mu.Unlock()
+	r.emit(c, NewMessage(r.Name, "new_member", "", "", []byte(c.ID)))
 }
 
-// leave queues a connection to leave the room.
+// leave removes a connection and notifies others; stops room if empty.
 func (r *room) leave(c *Conn) {
-	r.unregister <- c
+	r.mu.Lock()
+	if _, exists := r.members[c.ID]; !exists {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.members, c.ID)
+	empty := len(r.members) == 0
+	r.mu.Unlock()
+
+	r.emit(c, NewMessage(r.Name, "member_left", "", "", []byte(c.ID)))
+
+	if empty {
+		hub.mu.Lock()
+		r.mu.Lock()
+		if len(r.members) == 0 {
+			delete(hub.rooms, r.Name)
+			r.stopOnce.Do(func() {
+				close(r.stop)
+			})
+		}
+		r.mu.Unlock()
+		hub.mu.Unlock()
+	}
 }
 
 // emit queues a message to be broadcast to all room members (except sender).
 func (r *room) emit(c *Conn, msg *Message) {
-	r.send <- &roomMessage{c, msg.Bytes()}
+	select {
+	case r.send <- &roomMessage{c, msg.Bytes()}:
+	default:
+		log.Printf("room %s: dropped message (buffer full)", r.Name)
+	}
 }
 
 // snapshot returns a copy of current member IDs (for join_ack responses).
@@ -63,47 +91,10 @@ func (r *room) broadcast(msg *roomMessage) {
 	}
 }
 
-// handleJoin adds a connection to the room and notifies others of new member.
-func (r *room) handleJoin(c *Conn) {
-	r.mu.Lock()
-	r.members[c.ID] = c
-	r.mu.Unlock()
-	r.emit(c, NewMessage(r.Name, "new_member", "", "", []byte(c.ID)))
-}
-
-// handleLeave removes a connection and notifies others; stops room if empty.
-func (r *room) handleLeave(c *Conn) {
-	r.mu.Lock()
-	if _, exists := r.members[c.ID]; !exists {
-		r.mu.Unlock()
-		return
-	}
-	delete(r.members, c.ID)
-	empty := len(r.members) == 0
-	r.mu.Unlock()
-	r.emit(c, NewMessage(r.Name, "member_left", "", "", []byte(c.ID)))
-	if empty {
-		hub.mu.Lock()
-		r.mu.Lock()
-		if len(r.members) == 0 && len(r.register) == 0 {
-			delete(hub.rooms, r.Name)
-			r.stopOnce.Do(func() {
-				close(r.stop)
-			})
-		}
-		r.mu.Unlock()
-		hub.mu.Unlock()
-	}
-}
-
-// run is the room's main event loop processing register/unregister/send/stop.
+// run is the room's main event loop processing send/stop.
 func (r *room) run() {
 	for {
 		select {
-		case c := <-r.register:
-			r.handleJoin(c)
-		case c := <-r.unregister:
-			r.handleLeave(c)
 		case msg := <-r.send:
 			r.broadcast(msg)
 		case <-r.stop:
@@ -122,12 +113,10 @@ func (r *room) run() {
 // newRoom creates and starts a new room.
 func newRoom(name string) *room {
 	r := &room{
-		Name:       name,
-		members:    make(map[string]*Conn),
-		register:   make(chan *Conn, 16),
-		unregister: make(chan *Conn, 16),
-		send:       make(chan *roomMessage, 64),
-		stop:       make(chan struct{}),
+		Name:    name,
+		members: make(map[string]*Conn),
+		send:    make(chan *roomMessage, 256),
+		stop:    make(chan struct{}),
 	}
 	go r.run()
 	return r
