@@ -307,24 +307,16 @@ function roomer(url) {
             };
         }
 
+        // 1. Create frozen room object directly via emitter mixin
         self = emitter(room_methods);
 
-        const original_on = self.on;
-        const original_once = self.once;
-
-        self.on = function (type, fn, capture) {
-            if (typeof type === "string") {
-                registered_events[type] = true;
+        // 2. Attach newListener handler to automatically track
+        //    registered event names
+        self.on("newListener", function (event_type) {
+            if (event_type !== "newListener") {
+                registered_events[event_type] = true;
             }
-            return original_on(type, fn, capture);
-        };
-
-        self.once = function (type, fn, capture) {
-            if (typeof type === "string") {
-                registered_events[type] = true;
-            }
-            return original_once(type, fn, capture);
-        };
+        });
 
         rooms[name] = self;
 

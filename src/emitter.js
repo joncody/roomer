@@ -163,9 +163,10 @@ function create_emitter(target) {
     if (typeof target === "object" && target !== null) {
         self = Object.assign({}, target, methods);
     } else {
-        self = Object.freeze(methods);
+        self = Object.assign({}, methods);
     }
-    return self;
+
+    return Object.freeze(self);
 }
 
 export default Object.freeze(create_emitter);
