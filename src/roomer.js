@@ -217,7 +217,7 @@ function roomer(url) {
                     if (Array.isArray(parsed) === true) {
                         members.push(...parsed);
                     }
-                } catch (err) {
+                } catch (ignore) {
                     parsed = null;
                 }
                 is_open = true;
