@@ -170,7 +170,7 @@ Each message is a sequence of **length-prefixed** fields (big-endian `uint32`):
 5. Payload (`[]byte`)
 
 Example:  
-`[4][lobby][4][chat][0][][36][abc...][11][Hello room!]`
+`[5][lobby][4][chat][0][][36][abc...][11][Hello room!]`
 
 ---
 
