@@ -1,7 +1,47 @@
+/**
+ * @fileoverview Lightweight, functional event emitter library adhering
+ * to strict Crockfordian and Node.js-style EventEmitter conventions.
+ */
+
+/**
+ * @typedef {Object} EventEmitter
+ * @property {(type: string, fn: Function) => EventEmitter} addListener
+ *     Appends a listener callback for the specified event type.
+ * @property {(type: string, ...args: *) => boolean} emit
+ *     Synchronously calls each listener registered for the event.
+ * @property {(type?: string) => Function[]} listeners
+ *     Returns an array of listeners for an event type or all listeners.
+ * @property {(type: string, fn: Function) => EventEmitter} off
+ *     Alias for removeListener.
+ * @property {(type: string, fn: Function) => EventEmitter} on
+ *     Alias for addListener.
+ * @property {(type: string, fn: Function) => EventEmitter} once
+ *     Adds a one-time listener callback for the specified event type.
+ * @property {(type?: string) => EventEmitter} removeAllListeners
+ *     Removes all listeners or those for a specified event type.
+ * @property {(type: string, fn: Function) => EventEmitter} removeListener
+ *     Removes a listener callback for the specified event type.
+ */
+
+/**
+ * Creates an event emitter or mixes emitter methods into a target
+ * object.
+ *
+ * @param {Object} [target] - Optional target object to augment with
+ *     emitter methods.
+ * @returns {Readonly<EventEmitter>} The frozen event emitter instance.
+ */
 function create_emitter(target) {
     const events = Object.create(null);
     let self;
 
+    /**
+     * Synchronously invokes all listeners registered for the event.
+     *
+     * @param {string} type - Event type name.
+     * @param {...*} args - Arguments passed to each listener callback.
+     * @returns {boolean} True if the event had listeners, false otherwise.
+     */
     function emit(type, ...args) {
         if (typeof type !== "string") {
             return false;
@@ -17,6 +57,13 @@ function create_emitter(target) {
         return true;
     }
 
+    /**
+     * Appends a listener callback for the specified event type.
+     *
+     * @param {string} type - Event type name.
+     * @param {Function} listener - Callback function to invoke.
+     * @returns {EventEmitter} The event emitter instance.
+     */
     function addListener(type, listener) {
         if (typeof type !== "string" || typeof listener !== "function") {
             return self;
@@ -40,6 +87,13 @@ function create_emitter(target) {
         return self;
     }
 
+    /**
+     * Removes a listener callback for the specified event type.
+     *
+     * @param {string} type - Event type name.
+     * @param {Function} listener - Callback function to remove.
+     * @returns {EventEmitter} The event emitter instance.
+     */
     function removeListener(type, listener) {
         if (typeof type !== "string" || typeof listener !== "function") {
             return self;
@@ -75,6 +129,13 @@ function create_emitter(target) {
         return self;
     }
 
+    /**
+     * Adds a one-time listener callback for the specified event type.
+     *
+     * @param {string} type - Event type name.
+     * @param {Function} listener - Callback function to invoke once.
+     * @returns {EventEmitter} The event emitter instance.
+     */
     function once(type, listener) {
         if (typeof type !== "string" || typeof listener !== "function") {
             return self;
@@ -87,6 +148,12 @@ function create_emitter(target) {
         return addListener(type, onetime);
     }
 
+    /**
+     * Removes all listeners or those for a specified event type.
+     *
+     * @param {string} [type] - Optional event type name.
+     * @returns {EventEmitter} The event emitter instance.
+     */
     function removeAllListeners(type) {
         if (type === undefined) {
             if (
@@ -119,6 +186,12 @@ function create_emitter(target) {
         return self;
     }
 
+    /**
+     * Returns array of listeners for an event type or all listeners.
+     *
+     * @param {string} [type] - Optional event type name.
+     * @returns {Function[]} Array of listener functions.
+     */
     function listeners(type) {
         if (type === undefined) {
             const all = [];
