@@ -1,5 +1,13 @@
 # `roomer` – Room-Based WebSocket Framework
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/joncody/roomer.svg)](https://pkg.go.dev/github.com/joncody/roomer)
+[![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?style=flat&logo=go&logoColor=white)](https://golang.org/)
+[![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=flat&logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
+[![WebSocket](https://img.shields.io/badge/WebSocket-Binary%20Framing-010101?style=flat&logo=socketdotio&logoColor=white)](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
+[![Formal Verification: TLA+](https://img.shields.io/badge/Formal%20Verification-TLA%2B-555555?style=flat)](./spec/roomer.tla)
+[![Client Dependencies: 0](https://img.shields.io/badge/Client%20Deps-0-brightgreen.svg)]()
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 A lightweight, high-performance WebSocket framework for real-time applications in Go (server) and JavaScript (client). Built around **rooms**, **binary framing**, and **explicit message routing**, `roomer` handles connection lifecycle, room membership, and concurrency so you don’t have to.
 
 > 📦 **Zero client dependencies** • ⚡ **Binary packet framing** • 🌲 **Formal TLA+ spec**
