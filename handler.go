@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -38,7 +39,17 @@ func DefaultConfig() Config {
 		PingPeriod:      54 * time.Second,
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
-		CheckOrigin:     func(r *http.Request) bool { return true },
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true
+			}
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			return u.Host == r.Host
+		},
 	}
 }
 
