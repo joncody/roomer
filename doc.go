@@ -30,71 +30,71 @@
 //
 // Usage
 //
-//   1. Register custom event handlers (optional):
-//        roomer.RegisterHandler("chat", func(c *roomer.Conn, msg *roomer.Message) error {
-//            c.SendToRoom(msg.Room, msg.Event, msg.Payload)
-//            return nil
-//        })
+//  1. Register custom event handlers (optional):
+//     roomer.RegisterHandler("chat", func(c *roomer.Conn, msg *roomer.Message) error {
+//     c.SendToRoom(msg.Room, msg.Event, msg.Payload)
+//     return nil
+//     })
 //
-//   2. Mount the WebSocket handler with production options:
-//        http.Handle("/ws", roomer.SocketHandlerWithOptions(
-//            roomer.WithLogger(slog.Default()),
-//            roomer.WithMetrics(myPrometheusCollector),
-//            roomer.WithAdapter(myRedisAdapter),
-//            roomer.WithAuthorize(func(r *http.Request) (map[string]string, error) {
-//                // Extract JWT claims, session, etc.
-//                return claims, nil
-//            }),
-//            roomer.WithMaxMessageSize(8 * 1024 * 1024), // 8 MB max
-//            roomer.WithCheckOrigin(func(r *http.Request) bool { return true }),
-//        ))
+//  2. Mount the WebSocket handler with production options:
+//     http.Handle("/ws", roomer.SocketHandlerWithOptions(
+//     roomer.WithLogger(slog.Default()),
+//     roomer.WithMetrics(myPrometheusCollector),
+//     roomer.WithAdapter(myRedisAdapter),
+//     roomer.WithAuthorize(func(r *http.Request) (map[string]string, error) {
+//     // Extract JWT claims, session, etc.
+//     return claims, nil
+//     }),
+//     roomer.WithMaxMessageSize(8 * 1024 * 1024), // 8 MB max
+//     roomer.WithCheckOrigin(func(r *http.Request) bool { return true }),
+//     ))
 //
-//   3. Graceful Server Shutdown:
-//        // On SIGINT / SIGTERM:
-//        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-//        defer cancel()
-//        if err := roomer.Shutdown(ctx); err != nil {
-//            log.Printf("Shutdown error: %v", err)
-//        }
+//  3. Graceful Server Shutdown:
+//     // On SIGINT / SIGTERM:
+//     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+//     defer cancel()
+//     if err := roomer.Shutdown(ctx); err != nil {
+//     log.Printf("Shutdown error: %v", err)
+//     }
 //
-//   4. Message Structure and Construction
+//  4. Message Structure and Construction
 //
-//      All messages (client→server and server→client) follow a binary,
-//      length-prefixed format with these fields:
-//        - Room (string): Target room name (use "root" for direct messages).
-//        - Event (string): Event type (e.g., "join", "chat", "update").
-//        - Dst (string): Optional destination client ID (for direct messages).
-//        - Src (string): Source client ID (auto-set by server on send).
-//        - Payload ([]byte): Arbitrary binary data (commonly JSON-encoded).
+//     All messages (client→server and server→client) follow a binary,
+//     length-prefixed format with these fields:
+//     - Room (string): Target room name (use "root" for direct messages).
+//     - Event (string): Event type (e.g., "join", "chat", "update").
+//     - Dst (string): Optional destination client ID (for direct messages).
+//     - Src (string): Source client ID (auto-set by server on send).
+//     - Payload ([]byte): Arbitrary binary data (commonly JSON-encoded).
 //
-//      To construct a message on the server, use NewMessage:
-//        msg := roomer.NewMessage(
-//            room,    // e.g., "lobby"
-//            event,   // e.g., "chat"
-//            dst,     // e.g., "" for broadcast, or "abc123" for direct
-//            src,     // typically c.ID (sender's ID)
-//            payload, // e.g., []byte(`{"text":"hello"}`)
-//        )
-//        rawBytes := msg.Bytes() // serialize for sending
+//     To construct a message on the server, use NewMessage:
+//     msg := roomer.NewMessage(
+//     room,    // e.g., "lobby"
+//     event,   // e.g., "chat"
+//     dst,     // e.g., "" for broadcast, or "abc123" for direct
+//     src,     // typically c.ID (sender's ID)
+//     payload, // e.g., []byte(`{"text":"hello"}`)
+//     )
+//     rawBytes := msg.Bytes() // serialize for sending
 //
-//      Built-in client→server events:
-//        - "join":  { "event": "join", "room": "lobby" }
-//        - "leave": { "event": "leave", "room": "lobby" }
-//      To send a direct message from client, set "dst" to the recipient's ID.
+//     Built-in client→server events:
+//     - "join":  { "event": "join", "room": "lobby" }
+//     - "leave": { "event": "leave", "room": "lobby" }
+//     To send a direct message from client, set "dst" to the recipient's ID.
 //
-//   5. Server-Side Messaging APIs
+//  5. Server-Side Messaging APIs
 //
-//      From within a MessageHandler or server logic, use:
+//     From within a MessageHandler or server logic, use:
 //
-//        - c.TrySend(msg []byte) bool
-//            Sends raw binary message; returns false if dropped (slow or closed client).
-//            Drops trigger asynchronous connection cleanup to prevent deadlocks.
+//     - c.TrySend(msg []byte) bool
+//     Sends raw binary message; returns false if dropped (slow or closed client).
+//     Drops trigger asynchronous connection cleanup to prevent deadlocks.
 //
-//        - c.SendToRoom(room, event string, payload []byte)
-//            Broadcasts to all members of a room (excluding sender) and publishes to cluster adapter.
+//     - c.SendToRoom(room, event string, payload []byte)
+//     Broadcasts to all members of a room (excluding sender) and publishes to cluster adapter.
 //
-//        - c.SendToClient(dstID, event string, payload []byte)
-//            Sends a direct message to another client by ID.
+//     - c.SendToClient(dstID, event string, payload []byte)
+//     Sends a direct message to another client by ID.
 //
 // Concurrency & Safety
 //
