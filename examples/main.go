@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/joncody/roomer"
 )
@@ -60,10 +64,31 @@ func main() {
 		roomer.WithLogger(logger),
 	))
 
+	server := &http.Server{Addr: ":8080"}
+
+	// Listen for interrupt signals (Ctrl+C, SIGTERM) to demonstrate graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+
+		logger.Info("Shutting down server gracefully...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := roomer.Shutdown(shutdownCtx); err != nil {
+			logger.Error("Roomer shutdown error", "err", err)
+		}
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("HTTP server shutdown error", "err", err)
+		}
+	}()
+
 	logger.Info("Server running at http://localhost:8080/")
 	logger.Info("Run test suite at http://localhost:8080/tests/")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("Server terminated unexpectedly", "err", err)
 		os.Exit(1)
 	}
+	logger.Info("Server shutdown complete")
 }
