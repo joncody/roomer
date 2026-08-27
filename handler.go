@@ -43,7 +43,7 @@ func DefaultConfig() Config {
 		PingPeriod:      54 * time.Second,
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
-		CheckOrigin:     func(r *http.Request) bool { return true },
+        CheckOrigin:     nil, // Let gorilla/websocket enforce same-origin by default
 		Logger:          slog.Default(),
 		Metrics:         NopMetrics{},
 		Adapter:         newLocalAdapter(),
