@@ -2,8 +2,9 @@ package main
 
 import (
 	"html/template"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/joncody/roomer"
 )
@@ -12,18 +13,34 @@ var index = template.Must(template.ParseFiles("examples/index.html"))
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		http.Error(w, "Method not allowed", 405)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	index.Execute(w, nil)
+	if err := index.Execute(w, nil); err != nil {
+		slog.Error("Template execution error", "err", err)
+	}
 }
 
 func main() {
-	if err := roomer.RegisterHandler("chat", func(c *roomer.Conn, msg *roomer.Message) error {
+	// Configure structured slog text logger for readable console output
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	slog.SetDefault(logger)
+
+	// Register custom chat event handler with structured logging
+	err := roomer.RegisterHandler("chat", func(c *roomer.Conn, msg *roomer.Message) error {
+		logger.Info("Chat message received",
+			"room", msg.Room,
+			"sender", msg.Src,
+			"bytes", len(msg.Payload),
+		)
 		c.SendToRoom(msg.Room, msg.Event, msg.Payload)
 		return nil
-	}); err != nil {
-		log.Fatal("Failed to register handler:", err)
+	})
+	if err != nil {
+		logger.Error("Failed to register handler", "err", err)
+		os.Exit(1)
 	}
 
 	// 1. Serve root page
@@ -38,12 +55,15 @@ func main() {
 	// 4. Serve test suite (/tests/index.html, /tests/static/...)
 	http.Handle("/tests/", http.StripPrefix("/tests/", http.FileServer(http.Dir("tests"))))
 
-	// 5. WebSocket handler
-	http.HandleFunc("/ws", roomer.SocketHandler(nil))
+	// 5. WebSocket handler with structured logger configured
+	http.HandleFunc("/ws", roomer.SocketHandlerWithOptions(
+		roomer.WithLogger(logger),
+	))
 
-	log.Println("Server running at http://localhost:8080/")
-	log.Println("Run test suite at http://localhost:8080/tests/")
+	logger.Info("Server running at http://localhost:8080/")
+	logger.Info("Run test suite at http://localhost:8080/tests/")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal(err)
+		logger.Error("Server terminated unexpectedly", "err", err)
+		os.Exit(1)
 	}
 }
