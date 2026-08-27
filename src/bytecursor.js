@@ -338,12 +338,13 @@ function bytecursor(buffer, view_offset, view_length) {
 
     /**
      * Reads a sequence of bytes from current position and advances cursor.
+     * Returns a zero-copy Uint8Array view over the buffer segment.
      *
      * @param {number} [len] - Number of bytes to read. Defaults to remaining
      *     bytes in view.
      * @throws {TypeError} If len is not a number when provided.
      * @throws {RangeError} If len is negative or exceeds view bounds.
-     * @returns {Uint8Array} A new Uint8Array containing the copied bytes.
+     * @returns {Uint8Array} A Uint8Array view of the buffer bytes.
      */
     function getBytes(len) {
         if (len === undefined) {
@@ -351,10 +352,9 @@ function bytecursor(buffer, view_offset, view_length) {
         }
         const pos = advance(len);
         return new Uint8Array(
-            buffer.slice(
-                view.byteOffset + pos,
-                view.byteOffset + pos + len
-            )
+            buffer,
+            view.byteOffset + pos,
+            len
         );
     }
 
@@ -385,6 +385,7 @@ function bytecursor(buffer, view_offset, view_length) {
 
     /**
      * Reads and decodes a UTF-8 string from cursor and advances cursor.
+     * Decodes directly from the buffer view without intermediary buffer slicing.
      *
      * @param {number} [length] - Number of bytes to read. Defaults to
      *     remaining bytes in view.
@@ -393,11 +394,20 @@ function bytecursor(buffer, view_offset, view_length) {
      * @returns {string} The decoded UTF-8 string.
      */
     function getString(length) {
-        return decoder.decode(getBytes(length));
+        if (length === undefined) {
+            length = view.byteLength - cursor;
+        }
+        const pos = advance(length);
+        const bytes = new Uint8Array(
+            buffer,
+            view.byteOffset + pos,
+            length
+        );
+        return decoder.decode(bytes);
     }
 
     /**
-     * Encodes string as UTF-8, writes it into buffer, and advances cursor.
+     * Encodes string as UTF-8 directly into the buffer and advances cursor.
      *
      * @param {string} string - The string to encode and write.
      * @throws {TypeError} If string is not a string.
@@ -407,6 +417,16 @@ function bytecursor(buffer, view_offset, view_length) {
     function writeString(string) {
         if (typeof string !== "string") {
             throw new TypeError("writeString() requires a string");
+        }
+        if (typeof encoder.encodeInto === "function") {
+            const target = new Uint8Array(
+                buffer,
+                view.byteOffset + cursor,
+                view.byteLength - cursor
+            );
+            const result = encoder.encodeInto(string, target);
+            advance(result.written);
+            return self;
         }
         return writeBytes(encoder.encode(string));
     }

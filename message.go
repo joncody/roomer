@@ -1,7 +1,6 @@
 package roomer
 
 import (
-	"bytes"
 	"encoding/binary"
 )
 
@@ -19,32 +18,34 @@ type Message struct {
 	Payload       []byte
 }
 
-// readString reads a 4-byte big-endian length-prefixed string from buffer without cursor corruption on invalid input.
-func readString(buf *bytes.Buffer) (string, int, bool) {
-	if buf.Len() < 4 {
+// readString reads a 4-byte big-endian length-prefixed string from slice without cursor corruption on invalid input.
+func readString(data []byte, offset *int) (string, int, bool) {
+	if len(data)-*offset < 4 {
 		return "", 0, false
 	}
-	b := buf.Bytes()
-	length := int(binary.BigEndian.Uint32(b[:4]))
-	if length < 0 || buf.Len()-4 < length {
+	length := int(binary.BigEndian.Uint32(data[*offset:]))
+	*offset += 4
+	if length < 0 || len(data)-*offset < length {
 		return "", 0, false
 	}
-	buf.Next(4)
-	return string(buf.Next(length)), length, true
+	str := string(data[*offset : *offset+length])
+	*offset += length
+	return str, length, true
 }
 
-// readPayload reads a 4-byte big-endian length-prefixed byte slice from buffer without cursor corruption on invalid input.
-func readPayload(buf *bytes.Buffer) ([]byte, int, bool) {
-	if buf.Len() < 4 {
+// readPayload reads a 4-byte big-endian length-prefixed byte slice from slice without cursor corruption on invalid input.
+func readPayload(data []byte, offset *int) ([]byte, int, bool) {
+	if len(data)-*offset < 4 {
 		return nil, 0, false
 	}
-	b := buf.Bytes()
-	length := int(binary.BigEndian.Uint32(b[:4]))
-	if length < 0 || buf.Len()-4 < length {
+	length := int(binary.BigEndian.Uint32(data[*offset:]))
+	*offset += 4
+	if length < 0 || len(data)-*offset < length {
 		return nil, 0, false
 	}
-	buf.Next(4)
-	return buf.Next(length), length, true
+	payload := data[*offset : *offset+length]
+	*offset += length
+	return payload, length, true
 }
 
 // BytesToMessage decodes raw bytes into a Message (returns nil on malformed input).
@@ -52,25 +53,25 @@ func BytesToMessage(data []byte) *Message {
 	if len(data) < 20 {
 		return nil
 	}
-	buf := bytes.NewBuffer(data)
+	offset := 0
 	msg := &Message{}
 	var ok bool
-	if msg.Room, msg.RoomLength, ok = readString(buf); !ok {
+	if msg.Room, msg.RoomLength, ok = readString(data, &offset); !ok {
 		return nil
 	}
-	if msg.Event, msg.EventLength, ok = readString(buf); !ok {
+	if msg.Event, msg.EventLength, ok = readString(data, &offset); !ok {
 		return nil
 	}
-	if msg.Dst, msg.DstLength, ok = readString(buf); !ok {
+	if msg.Dst, msg.DstLength, ok = readString(data, &offset); !ok {
 		return nil
 	}
-	if msg.Src, msg.SrcLength, ok = readString(buf); !ok {
+	if msg.Src, msg.SrcLength, ok = readString(data, &offset); !ok {
 		return nil
 	}
-	if msg.Payload, msg.PayloadLength, ok = readPayload(buf); !ok {
+	if msg.Payload, msg.PayloadLength, ok = readPayload(data, &offset); !ok {
 		return nil
 	}
-	if buf.Len() != 0 {
+	if offset != len(data) {
 		return nil
 	}
 	return msg
@@ -78,30 +79,25 @@ func BytesToMessage(data []byte) *Message {
 
 // Bytes serializes the Message into a binary format with length prefixes.
 func (msg *Message) Bytes() []byte {
-	roomBytes := []byte(msg.Room)
-	eventBytes := []byte(msg.Event)
-	dstBytes := []byte(msg.Dst)
-	srcBytes := []byte(msg.Src)
-
-	totalLen := 20 + len(roomBytes) + len(eventBytes) + len(dstBytes) + len(srcBytes) + len(msg.Payload)
+	totalLen := 20 + len(msg.Room) + len(msg.Event) + len(msg.Dst) + len(msg.Src) + len(msg.Payload)
 	buf := make([]byte, totalLen)
 
 	offset := 0
-	binary.BigEndian.PutUint32(buf[offset:], uint32(len(roomBytes)))
+	binary.BigEndian.PutUint32(buf[offset:], uint32(len(msg.Room)))
 	offset += 4
-	offset += copy(buf[offset:], roomBytes)
+	offset += copy(buf[offset:], msg.Room)
 
-	binary.BigEndian.PutUint32(buf[offset:], uint32(len(eventBytes)))
+	binary.BigEndian.PutUint32(buf[offset:], uint32(len(msg.Event)))
 	offset += 4
-	offset += copy(buf[offset:], eventBytes)
+	offset += copy(buf[offset:], msg.Event)
 
-	binary.BigEndian.PutUint32(buf[offset:], uint32(len(dstBytes)))
+	binary.BigEndian.PutUint32(buf[offset:], uint32(len(msg.Dst)))
 	offset += 4
-	offset += copy(buf[offset:], dstBytes)
+	offset += copy(buf[offset:], msg.Dst)
 
-	binary.BigEndian.PutUint32(buf[offset:], uint32(len(srcBytes)))
+	binary.BigEndian.PutUint32(buf[offset:], uint32(len(msg.Src)))
 	offset += 4
-	offset += copy(buf[offset:], srcBytes)
+	offset += copy(buf[offset:], msg.Src)
 
 	binary.BigEndian.PutUint32(buf[offset:], uint32(len(msg.Payload)))
 	offset += 4

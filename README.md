@@ -10,23 +10,24 @@
 
 A lightweight, high-performance WebSocket framework for real-time applications in Go (server) and JavaScript (client). Built around **rooms**, **binary framing**, and **explicit message routing**, `roomer` handles connection lifecycle, room membership, and concurrency so you don’t have to.
 
-> 📦 **Zero client dependencies** • ⚡ **Binary packet framing** • 🌲 **Formal TLA+ spec**
+> 📦 **Zero client dependencies** • ⚡ **Zero-copy binary framing** • 🔒 **Lock-striped hub** • 🌲 **Formal TLA+ spec**
 
 ---
 
 ## ✅ Key Features
 
-- 🏢 **Automatic Room Management**: Create, join, and leave rooms on demand.
-- ⚡ **Efficient Binary Protocol**: Uses length-prefixed fields for compact, fast message encoding.
+- 🏢 **Automatic Room Management**: Create, join, and leave rooms dynamically with automatic empty-room cleanup.
+- ⚡ **Zero-Copy Binary Protocol**: Uses length-prefixed fields with direct slice decoding and single-allocation packet serialization for ultra-low latency.
 - 📨 **Flexible Messaging**:
   - Broadcast to rooms (excluding sender)
   - Send direct messages to peers
   - Send private messages to self via `TrySend`
-- 🔒 **Concurrency-Safe**: Thread-safe rooms and hub using Go’s `sync` primitives.
-- 🧩 **Handler Registration**: Register per-event logic on the server with `RegisterHandler`.
-- 🌐 **Single Root Connection**: Clients start in a `"root"` room and dynamically join others.
-- ⚙️ **Configurable Settings**: Custom limits for max message size, timeout deadlines, and WebSocket options.
-- 🧪 **Formal Verification**: Includes TLA+ specification (`spec/roomer.tla`) proving protocol safety.
+- 🔒 **Lock-Striped Sharding**: Hub connections and rooms are partitioned across 32 lock-striped shards via FNV-1a hashing to eliminate CPU core contention.
+- 🚀 **On-Demand Room Fanout**: Direct non-blocking broadcasting without per-room background goroutines or channel queue bottlenecks.
+- 🧩 **Handler Registration**: Register custom per-event server logic with `RegisterHandler`.
+- 🌐 **Single Root Connection**: Clients start in a `"root"` room and dynamically join and leave channels over a single WebSocket connection.
+- ⚙️ **Configurable Settings**: Custom limits for max message size, timeout deadlines, and WebSocket buffer sizes.
+- 🧪 **Formal Verification**: Includes a TLA+ specification (`spec/roomer.tla`) proving state safety and room membership invariants.
 
 ---
 
@@ -41,7 +42,7 @@ go get github.com/joncody/roomer
 ### JavaScript Client
 Include these standalone files from `src/` in your frontend:
 - `src/roomer.js`
-- `src/bytecursor.js` (binary parsing)
+- `src/bytecursor.js` (zero-copy binary parsing)
 - `src/emitter.js` (event subscription)
 
 ```js
@@ -161,7 +162,7 @@ Returns the `"root"` room. All other rooms are created via `.join()`.
 |--------|-------------|
 | `c.SendToRoom(room, event string, payload []byte)` | Broadcasts to all room members **except sender**. |
 | `c.SendToClient(dstID, event string, payload []byte)` | Sends direct message to another client (uses `"root"` room internally). |
-| `c.TrySend(msg []byte) bool` | **Sends a message to self** (e.g., acks, replies). Non-blocking; returns `false` if client is slow or closed. |
+| `c.TrySend(msg []byte) bool` | **Sends a message to self** (e.g., acks, replies). Non-blocking; returns `false` and tears down slow or closed clients asynchronously. |
 | `c.ID` | Unique connection UUID string (read-only field). |
 | `c.Claims` | Map of auth claims (e.g., from JWT / HTTP request). |
 
@@ -184,10 +185,10 @@ Example:
 
 ## 🛡️ Concurrency & Safety
 
-- All room operations are **goroutine-safe**.
-- Non-blocking sends: `TrySend` and internal messaging never block.
-- Per-connection room membership tracking guarantees clean unregisters upon disconnect.
-- Defensive binary parsing verifies frame bounds before advancing buffers.
+- **Lock-Striped Sharding**: Hub state is partitioned into 32 distinct shards to distribute read/write locks across CPU cores under heavy concurrent traffic.
+- **On-Demand Fanout**: Broadcasts iterate through members directly under reader locks without channel queuing overhead or dedicated per-room goroutines.
+- **Deadlock-Free Asynchronous Teardown**: Slow client disconnects triggered during `TrySend` execute asynchronously, guaranteeing lock ordering integrity during broadcast loops.
+- **Zero-Copy Byte Decoding**: Slices and strings are decoded directly from raw buffers using bounds-checked offset math without memory reallocation.
 
 ---
 

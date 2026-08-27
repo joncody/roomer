@@ -2,81 +2,133 @@ package roomer
 
 import "sync"
 
-// Hub manages all rooms and connections (singleton via global `hub`).
-type Hub struct {
+const shardCount = 32
+
+type connShard struct {
 	mu    sync.RWMutex
-	rooms map[string]*room
 	conns map[string]*Conn
 }
 
-// Global hub instance
-var hub = &Hub{
-	rooms: make(map[string]*room),
-	conns: make(map[string]*Conn),
+type roomShard struct {
+	mu    sync.RWMutex
+	rooms map[string]*room
 }
+
+// Hub manages all rooms and connections via lock-striped shards.
+type Hub struct {
+	connShards [shardCount]connShard
+	roomShards [shardCount]roomShard
+}
+
+// getShardIndex computes an FNV-1a hash index for key partitioning.
+func getShardIndex(key string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return h % shardCount
+}
+
+func newHub() *Hub {
+	h := &Hub{}
+	for i := 0; i < shardCount; i++ {
+		h.connShards[i].conns = make(map[string]*Conn)
+		h.roomShards[i].rooms = make(map[string]*room)
+	}
+	return h
+}
+
+// Global hub instance
+var hub = newHub()
 
 // getConn returns a connection by ID, if it exists.
 func (h *Hub) getConn(id string) (*Conn, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	c, ok := h.conns[id]
+	shard := &h.connShards[getShardIndex(id)]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	c, ok := shard.conns[id]
 	return c, ok
 }
 
 // addConn adds a new connection to the hub.
 func (h *Hub) addConn(c *Conn) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.conns[c.ID] = c
+	shard := &h.connShards[getShardIndex(c.ID)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	shard.conns[c.ID] = c
 }
 
 // removeConn removes a connection from the hub.
 func (h *Hub) removeConn(id string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.conns, id)
+	shard := &h.connShards[getShardIndex(id)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	delete(shard.conns, id)
 }
 
 // getRoom returns a room by name, if it exists.
 func (h *Hub) getRoom(name string) (*room, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	r, ok := h.rooms[name]
+	shard := &h.roomShards[getShardIndex(name)]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	r, ok := shard.rooms[name]
 	return r, ok
 }
 
-// removeRoom deletes a room from the hub (called when room becomes empty).
-func (h *Hub) removeRoom(name string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.rooms, name)
+// removeRoom deletes a specific room instance from the hub if it remains empty.
+func (h *Hub) removeRoom(r *room) {
+	shard := &h.roomShards[getShardIndex(r.Name)]
+	shard.mu.Lock()
+	r.mu.Lock()
+	if current, ok := shard.rooms[r.Name]; ok && current == r {
+		if len(r.members) == 0 {
+			delete(shard.rooms, r.Name)
+		}
+	}
+	r.mu.Unlock()
+	shard.mu.Unlock()
 }
 
-// joinRoom adds a connection to a room, creating the room if needed.
+// joinRoom adds a connection to a room atomically, creating the room if needed.
 func (h *Hub) joinRoom(name string, c *Conn) {
 	select {
 	case <-c.done:
 		return
 	default:
 	}
-	h.mu.Lock()
-	room, ok := h.rooms[name]
+	shard := &h.roomShards[getShardIndex(name)]
+	shard.mu.Lock()
+	r, ok := shard.rooms[name]
 	if !ok {
-		room = newRoom(name)
-		h.rooms[name] = room
+		r = newRoom(name)
+		shard.rooms[name] = r
 	}
-	h.mu.Unlock()
 	if c.trackRoom(name) {
-		room.join(c)
+		r.addMember(c)
+		shard.mu.Unlock()
+		r.emit(c, NewMessage(r.Name, "new_member", "", "", []byte(c.ID)))
+		return
 	}
+	shard.mu.Unlock()
 }
 
-// leaveRoom removes a connection from a specific room.
+// leaveRoom removes a connection from a specific room and cleans up empty rooms.
 func (h *Hub) leaveRoom(name string, c *Conn) {
 	c.untrackRoom(name)
-	if room, ok := h.getRoom(name); ok {
-		room.leave(c)
+	shard := &h.roomShards[getShardIndex(name)]
+	shard.mu.RLock()
+	r, ok := shard.rooms[name]
+	shard.mu.RUnlock()
+	if !ok {
+		return
 	}
+
+	if r.removeMember(c) {
+		h.removeRoom(r)
+	}
+
+	r.emit(c, NewMessage(r.Name, "member_left", "", "", []byte(c.ID)))
 }
 
 // leaveAllRooms removes a connection from every room it's in.

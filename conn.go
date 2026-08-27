@@ -71,7 +71,7 @@ func (c *Conn) TrySend(msg []byte) bool {
 		return true
 	default:
 		log.Printf("Conn %s: dropped message (slow or closed)", c.ID)
-		c.cleanup()
+		go c.cleanup()
 		return false
 	}
 }
@@ -141,7 +141,9 @@ func (c *Conn) cleanup() {
 		close(c.done)
 		hub.leaveAllRooms(c)
 		hub.removeConn(c.ID)
-		c.socket.Close()
+		if c.socket != nil {
+			c.socket.Close()
+		}
 	})
 }
 
