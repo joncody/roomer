@@ -154,14 +154,14 @@ func SocketHandlerWithOptions(opts ...Option) http.HandlerFunc {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var claims map[string]string
-		if cfg.Authorize != nil {
-			var err error
-			claims, err = cfg.Authorize(r)
-			if err != nil {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if cfg.Authorize == nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		claims, err := cfg.Authorize(r)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
 		}
 		c := newConnection(w, r, claims, cfg)
 		if c == nil {
