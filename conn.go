@@ -2,7 +2,6 @@ package roomer
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -68,9 +67,17 @@ func (c *Conn) TrySend(msg []byte) bool {
 	case <-c.done:
 		return false
 	case c.send <- msg:
+		if c.config.Metrics != nil {
+			c.config.Metrics.OnMessageSent(len(msg))
+		}
 		return true
 	default:
-		log.Printf("Conn %s: dropped message (slow or closed)", c.ID)
+		if c.config.Metrics != nil {
+			c.config.Metrics.OnMessageDropped()
+		}
+		if c.config.Logger != nil {
+			c.config.Logger.Warn("Conn dropped message (buffer full or slow client)", "conn_id", c.ID)
+		}
 		go c.cleanup()
 		return false
 	}
@@ -125,7 +132,9 @@ func (c *Conn) dispatch(msg *Message) {
 		}
 		if handler := getHandler(msg.Event); handler != nil {
 			if err := handler(c, msg); err != nil {
-				log.Printf("Handler error for event %q from conn %s: %v", msg.Event, c.ID, err)
+				if c.config.Logger != nil {
+					c.config.Logger.Error("Message handler error", "event", msg.Event, "conn_id", c.ID, "err", err)
+				}
 			}
 			return
 		}
@@ -161,9 +170,14 @@ func (c *Conn) readPump() {
 		if err != nil {
 			return
 		}
+		if c.config.Metrics != nil {
+			c.config.Metrics.OnMessageReceived(len(data))
+		}
 		msg := BytesToMessage(data)
 		if msg == nil {
-			log.Printf("Conn %s: malformed message", c.ID)
+			if c.config.Logger != nil {
+				c.config.Logger.Warn("Malformed binary packet received", "conn_id", c.ID)
+			}
 			return
 		}
 		c.dispatch(msg)

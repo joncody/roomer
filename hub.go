@@ -1,6 +1,12 @@
 package roomer
 
-import "sync"
+import (
+	"context"
+	"log/slog"
+	"sync"
+
+	"github.com/gorilla/websocket"
+)
 
 const shardCount = 32
 
@@ -14,10 +20,14 @@ type roomShard struct {
 	rooms map[string]*room
 }
 
-// Hub manages all rooms and connections via lock-striped shards.
+// Hub manages all rooms and connections via lock-striped shards and distributed adapters.
 type Hub struct {
 	connShards [shardCount]connShard
 	roomShards [shardCount]roomShard
+	adapter    Adapter
+	metrics    Metrics
+	logger     *slog.Logger
+	cfgMu      sync.RWMutex
 }
 
 // getShardIndex computes an FNV-1a hash index for key partitioning.
@@ -31,7 +41,11 @@ func getShardIndex(key string) uint32 {
 }
 
 func newHub() *Hub {
-	h := &Hub{}
+	h := &Hub{
+		adapter: newLocalAdapter(),
+		metrics: NopMetrics{},
+		logger:  slog.Default(),
+	}
 	for i := 0; i < shardCount; i++ {
 		h.connShards[i].conns = make(map[string]*Conn)
 		h.roomShards[i].rooms = make(map[string]*room)
@@ -42,6 +56,26 @@ func newHub() *Hub {
 // Global hub instance
 var hub = newHub()
 
+// configure initializes telemetry, logger, and distributed adapter subscribers.
+func (h *Hub) configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+	if adapter != nil {
+		h.adapter = adapter
+		_ = h.adapter.Subscribe(func(roomName string, msg *Message) {
+			if r, ok := h.getRoom(roomName); ok {
+				r.emitLocal(msg)
+			}
+		})
+	}
+	if metrics != nil {
+		h.metrics = metrics
+	}
+	if logger != nil {
+		h.logger = logger
+	}
+}
+
 // getConn returns a connection by ID, if it exists.
 func (h *Hub) getConn(id string) (*Conn, bool) {
 	shard := &h.connShards[getShardIndex(id)]
@@ -51,20 +85,26 @@ func (h *Hub) getConn(id string) (*Conn, bool) {
 	return c, ok
 }
 
-// addConn adds a new connection to the hub.
+// addConn adds a new connection to the hub and tracks connection metrics.
 func (h *Hub) addConn(c *Conn) {
 	shard := &h.connShards[getShardIndex(c.ID)]
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 	shard.conns[c.ID] = c
+	shard.mu.Unlock()
+	if h.metrics != nil {
+		h.metrics.OnConnect()
+	}
 }
 
-// removeConn removes a connection from the hub.
+// removeConn removes a connection from the hub and tracks disconnection metrics.
 func (h *Hub) removeConn(id string) {
 	shard := &h.connShards[getShardIndex(id)]
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 	delete(shard.conns, id)
+	shard.mu.Unlock()
+	if h.metrics != nil {
+		h.metrics.OnDisconnect()
+	}
 }
 
 // getRoom returns a room by name, if it exists.
@@ -84,6 +124,9 @@ func (h *Hub) removeRoom(r *room) {
 	if current, ok := shard.rooms[r.Name]; ok && current == r {
 		if len(r.members) == 0 {
 			delete(shard.rooms, r.Name)
+			if h.metrics != nil {
+				h.metrics.OnRoomDeleted(r.Name)
+			}
 		}
 	}
 	r.mu.Unlock()
@@ -103,6 +146,9 @@ func (h *Hub) joinRoom(name string, c *Conn) {
 	if !ok {
 		r = newRoom(name)
 		shard.rooms[name] = r
+		if h.metrics != nil {
+			h.metrics.OnRoomCreated(name)
+		}
 	}
 	if c.trackRoom(name) {
 		r.addMember(c)
@@ -135,5 +181,46 @@ func (h *Hub) leaveRoom(name string, c *Conn) {
 func (h *Hub) leaveAllRooms(c *Conn) {
 	for _, name := range c.joinedRooms() {
 		h.leaveRoom(name, c)
+	}
+}
+
+// Shutdown gracefully drains active connections, sends WebSocket Close frames, and terminates adapters.
+func (h *Hub) Shutdown(ctx context.Context) error {
+	var conns []*Conn
+	for i := 0; i < shardCount; i++ {
+		shard := &h.connShards[i]
+		shard.mu.RLock()
+		for _, c := range shard.conns {
+			conns = append(conns, c)
+		}
+		shard.mu.RUnlock()
+	}
+
+	var wg sync.WaitGroup
+	closeData := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
+
+	for _, c := range conns {
+		wg.Add(1)
+		go func(conn *Conn) {
+			defer wg.Done()
+			_ = conn.write(websocket.CloseMessage, closeData)
+			conn.cleanup()
+		}(c)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if h.adapter != nil {
+			return h.adapter.Close()
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

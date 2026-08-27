@@ -1,8 +1,10 @@
 package roomer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -24,6 +26,9 @@ type Config struct {
 	ReadBufferSize  int
 	WriteBufferSize int
 	CheckOrigin     func(r *http.Request) bool
+	Logger          *slog.Logger
+	Metrics         Metrics
+	Adapter         Adapter
 }
 
 // Option sets a configuration option for roomer WebSocket handling.
@@ -39,6 +44,9 @@ func DefaultConfig() Config {
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
 		CheckOrigin:     func(r *http.Request) bool { return true },
+		Logger:          slog.Default(),
+		Metrics:         NopMetrics{},
+		Adapter:         newLocalAdapter(),
 	}
 }
 
@@ -107,6 +115,33 @@ func WithBufferSizes(readSize, writeSize int) Option {
 	}
 }
 
+// WithLogger sets the structured logger.
+func WithLogger(logger *slog.Logger) Option {
+	return func(c *Config) {
+		if logger != nil {
+			c.Logger = logger
+		}
+	}
+}
+
+// WithMetrics sets the telemetry metrics provider.
+func WithMetrics(metrics Metrics) Option {
+	return func(c *Config) {
+		if metrics != nil {
+			c.Metrics = metrics
+		}
+	}
+}
+
+// WithAdapter sets the multi-node distributed clustering adapter.
+func WithAdapter(adapter Adapter) Option {
+	return func(c *Config) {
+		if adapter != nil {
+			c.Adapter = adapter
+		}
+	}
+}
+
 var (
 	messageHandlersMu sync.RWMutex
 	messageHandlers   = make(map[string]MessageHandler)
@@ -136,6 +171,11 @@ func getHandler(event string) MessageHandler {
 	return messageHandlers[event]
 }
 
+// Shutdown gracefully terminates all connections and releases hub/adapter resources within deadline context.
+func Shutdown(ctx context.Context) error {
+	return hub.Shutdown(ctx)
+}
+
 // SocketHandler returns an HTTP handler that upgrades to WebSocket and manages the connection lifecycle.
 func SocketHandler(authFn Authorize) http.HandlerFunc {
 	return SocketHandlerWithOptions(WithAuthorize(authFn))
@@ -149,6 +189,9 @@ func SocketHandlerWithOptions(opts ...Option) http.HandlerFunc {
 			opt(&cfg)
 		}
 	}
+
+	hub.configure(cfg.Adapter, cfg.Metrics, cfg.Logger)
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

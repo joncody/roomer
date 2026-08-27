@@ -1,6 +1,7 @@
 package roomer
 
 import (
+	"context"
 	"sync"
 )
 
@@ -40,13 +41,30 @@ func (r *room) leave(c *Conn) {
 	r.emit(c, NewMessage(r.Name, "member_left", "", "", []byte(c.ID)))
 }
 
-// emit broadcasts a message to all room members (except sender) on-demand without intermediate queues.
+// emit broadcasts a message to local room members and publishes to the distributed cluster adapter.
 func (r *room) emit(c *Conn, msg *Message) {
+	data := msg.Bytes()
+	r.mu.RLock()
+	for id, member := range r.members {
+		if c == nil || id != c.ID {
+			member.TrySend(data)
+		}
+	}
+	r.mu.RUnlock()
+
+	// Publish to multi-node cluster adapter if configured
+	if hub.adapter != nil {
+		_ = hub.adapter.Publish(context.Background(), r.Name, msg)
+	}
+}
+
+// emitLocal broadcasts a message received from cluster subscribers to local members only.
+func (r *room) emitLocal(msg *Message) {
 	data := msg.Bytes()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for id, member := range r.members {
-		if c == nil || id != c.ID {
+		if id != msg.Src {
 			member.TrySend(data)
 		}
 	}
