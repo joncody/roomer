@@ -2,13 +2,16 @@ package roomer
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // -----------------------------------------------------------------------------
-// 1. Functional Unit Tests
+// 1. Functional & Concurrency Unit Tests
 // -----------------------------------------------------------------------------
 
 func TestMessage_Roundtrip(t *testing.T) {
@@ -38,14 +41,12 @@ func TestMessage_Roundtrip(t *testing.T) {
 }
 
 func TestMessage_MalformedInput(t *testing.T) {
-	// 1. Under minimum packet length (< 20 bytes)
 	if msg := BytesToMessage([]byte{1, 2, 3}); msg != nil {
 		t.Errorf("expected nil for short payload, got %+v", msg)
 	}
 
-	// 2. Corrupted length prefix exceeding slice boundary
 	corrupted := []byte{
-		0, 0, 0, 255, // RoomLength = 255 bytes, but total slice is only 20 bytes
+		0, 0, 0, 255,
 		'a', 'b', 'c', 'd',
 		0, 0, 0, 0,
 		0, 0, 0, 0,
@@ -57,7 +58,29 @@ func TestMessage_MalformedInput(t *testing.T) {
 	}
 }
 
-func TestHub_ConcurrentShardedAccess(t *testing.T) {
+type testMetricsCollector struct {
+	NopMetrics
+	connects int64
+	rooms    int64
+	sent     int64
+}
+
+func (m *testMetricsCollector) OnConnect() {
+	atomic.AddInt64(&m.connects, 1)
+}
+
+func (m *testMetricsCollector) OnRoomCreated(room string) {
+	atomic.AddInt64(&m.rooms, 1)
+}
+
+func (m *testMetricsCollector) OnMessageSent(bytes int) {
+	atomic.AddInt64(&m.sent, int64(bytes))
+}
+
+func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
+	metrics := &testMetricsCollector{}
+	hub.configure(newLocalAdapter(), metrics, nil)
+
 	var wg sync.WaitGroup
 	workers := 50
 	connsPerWorker := 30
@@ -71,13 +94,13 @@ func TestHub_ConcurrentShardedAccess(t *testing.T) {
 				roomName := fmt.Sprintf("room_%d", (workerID+i)%10)
 
 				c := &Conn{
-					ID:    connID,
-					send:  make(chan []byte, 256),
-					done:  make(chan struct{}),
-					rooms: make(map[string]struct{}),
+					ID:     connID,
+					send:   make(chan []byte, 256),
+					done:   make(chan struct{}),
+					rooms:  make(map[string]struct{}),
+					config: DefaultConfig(),
 				}
 
-				// Start background drain to simulate active client reading frames
 				go func(conn *Conn) {
 					for {
 						select {
@@ -88,11 +111,9 @@ func TestHub_ConcurrentShardedAccess(t *testing.T) {
 					}
 				}(c)
 
-				// Concurrent Adds / Joins
 				hub.addConn(c)
 				hub.joinRoom(roomName, c)
 
-				// Concurrent Reads
 				if _, ok := hub.getConn(connID); !ok {
 					t.Errorf("failed to retrieve conn %s", connID)
 				}
@@ -100,7 +121,6 @@ func TestHub_ConcurrentShardedAccess(t *testing.T) {
 					t.Errorf("failed to retrieve room %s", roomName)
 				}
 
-				// Concurrent Leaves / Removals
 				hub.leaveRoom(roomName, c)
 				hub.removeConn(connID)
 				c.cleanup()
@@ -109,6 +129,34 @@ func TestHub_ConcurrentShardedAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+
+	if atomic.LoadInt64(&metrics.connects) == 0 {
+		t.Errorf("expected metrics to record connects")
+	}
+}
+
+func TestHub_GracefulShutdown(t *testing.T) {
+	c := &Conn{
+		ID:     "shutdown_test_conn",
+		send:   make(chan []byte, 10),
+		done:   make(chan struct{}),
+		rooms:  make(map[string]struct{}),
+		config: DefaultConfig(),
+	}
+
+	hub.addConn(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := Shutdown(ctx); err != nil {
+		t.Fatalf("expected graceful shutdown without error, got %v", err)
+	}
+
+	select {
+	case <-c.done:
+	default:
+		t.Errorf("expected connection to be cleaned up on shutdown")
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -140,15 +188,35 @@ func BenchmarkRoom_Emit(b *testing.B) {
 	r := newRoom("bench_room")
 	msg := NewMessage("bench_room", "chat", "", "sender", []byte("payload"))
 
+	conns := make([]*Conn, 100)
 	for i := 0; i < 100; i++ {
 		c := &Conn{
-			ID:    fmt.Sprintf("user_%d", i),
-			send:  make(chan []byte, 1024),
-			done:  make(chan struct{}),
-			rooms: make(map[string]struct{}),
+			ID:     fmt.Sprintf("user_%d", i),
+			send:   make(chan []byte, 2048),
+			done:   make(chan struct{}),
+			rooms:  make(map[string]struct{}),
+			config: DefaultConfig(),
 		}
 		r.addMember(c)
+		conns[i] = c
+
+		// Spawn background drainer simulating active WebSocket client consumption
+		go func(conn *Conn) {
+			for {
+				select {
+				case <-conn.done:
+					return
+				case <-conn.send:
+				}
+			}
+		}(c)
 	}
+
+	defer func() {
+		for _, c := range conns {
+			c.cleanup()
+		}
+	}()
 
 	b.ResetTimer()
 	b.ReportAllocs()

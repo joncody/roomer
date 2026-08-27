@@ -158,6 +158,9 @@ func (c *Conn) cleanup() {
 
 // readPump reads messages from the WebSocket and dispatches them.
 func (c *Conn) readPump() {
+	if c.socket == nil {
+		return
+	}
 	defer c.cleanup()
 	c.socket.SetReadLimit(c.config.MaxMessageSize)
 	c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
@@ -186,6 +189,9 @@ func (c *Conn) readPump() {
 
 // write writes a message with a specified WebSocket message type and deadline.
 func (c *Conn) write(mt int, payload []byte) error {
+	if c.socket == nil {
+		return nil
+	}
 	c.socket.SetWriteDeadline(time.Now().Add(c.config.WriteWait))
 	return c.socket.WriteMessage(mt, payload)
 }

@@ -1,18 +1,29 @@
-// Package roomer provides a scalable, room-based WebSocket server
+// Package roomer provides a high-performance, room-based WebSocket framework
 // for real-time bidirectional communication between clients.
 //
 // Core Concepts
 //
 //   - Connection (Conn): Represents a single authenticated WebSocket client.
-//     Each has a unique ID and optional claims (e.g., user ID, roles).
+//     Each has a unique UUID and optional authenticated claims (e.g., user ID, roles).
 //
 //   - Room: A named group of connections. Messages sent to a room are
 //     broadcast to all members (excluding the sender). The "root" room
-//     is auto-joined by every new connection.
+//     is auto-joined by every new connection. Empty rooms are garbage-collected
+//     automatically.
+//
+//   - Hub: Manages all active connections and rooms across 32 lock-striped shards
+//     using FNV-1a hashing to eliminate CPU core mutex contention.
+//
+//   - Cluster Adapter (Adapter): Pluggable interface for multi-node deployments
+//     (e.g., Redis, NATS, Kafka). Outbound room broadcasts publish to the cluster,
+//     and incoming cluster messages fan out locally without loopbacks.
+//
+//   - Observability (Metrics): Telemetry interface for instrumenting connections,
+//     disconnections, room lifecycle, byte throughput, and dropped frame counts.
 //
 //   - Message Format: Binary, length-prefixed frames encoding room,
-//     event, destination, source, and payload. This enables efficient
-//     parsing and low overhead.
+//     event, destination, source, and payload. This enables zero-copy
+//     slice parsing and single-allocation serialization.
 //
 //   - Event Dispatch: Built-in events ("join", "leave") and custom
 //     events handled via registered MessageHandlers.
@@ -21,12 +32,15 @@
 //
 //   1. Register custom event handlers (optional):
 //        roomer.RegisterHandler("chat", func(c *roomer.Conn, msg *roomer.Message) error {
-//            // Handle "chat" event
+//            c.SendToRoom(msg.Room, msg.Event, msg.Payload)
 //            return nil
 //        })
 //
-//   2. Mount the WebSocket handler with optional authentication and configuration options:
+//   2. Mount the WebSocket handler with production options:
 //        http.Handle("/ws", roomer.SocketHandlerWithOptions(
+//            roomer.WithLogger(slog.Default()),
+//            roomer.WithMetrics(myPrometheusCollector),
+//            roomer.WithAdapter(myRedisAdapter),
 //            roomer.WithAuthorize(func(r *http.Request) (map[string]string, error) {
 //                // Extract JWT claims, session, etc.
 //                return claims, nil
@@ -35,7 +49,15 @@
 //            roomer.WithCheckOrigin(func(r *http.Request) bool { return true }),
 //        ))
 //
-//   3. Message Structure and Construction
+//   3. Graceful Server Shutdown:
+//        // On SIGINT / SIGTERM:
+//        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+//        defer cancel()
+//        if err := roomer.Shutdown(ctx); err != nil {
+//            log.Printf("Shutdown error: %v", err)
+//        }
+//
+//   4. Message Structure and Construction
 //
 //      All messages (client→server and server→client) follow a binary,
 //      length-prefixed format with these fields:
@@ -60,37 +82,26 @@
 //        - "leave": { "event": "leave", "room": "lobby" }
 //      To send a direct message from client, set "dst" to the recipient's ID.
 //
-//   4. Server-Side Messaging APIs
+//   5. Server-Side Messaging APIs
 //
 //      From within a MessageHandler or server logic, use:
 //
 //        - c.TrySend(msg []byte) bool
 //            Sends raw binary message; returns false if dropped (slow or closed client).
-//            Typically used with msg := NewMessage(...); c.TrySend(msg.Bytes()).
+//            Drops trigger asynchronous connection cleanup to prevent deadlocks.
 //
 //        - c.SendToRoom(room, event string, payload []byte)
-//            Broadcasts to all members of a room (excluding sender).
-//            Equivalent to: NewMessage(room, event, "", c.ID, payload) + room emit.
+//            Broadcasts to all members of a room (excluding sender) and publishes to cluster adapter.
 //
 //        - c.SendToClient(dstID, event string, payload []byte)
 //            Sends a direct message to another client by ID.
-//            Equivalent to: NewMessage("root", event, dstID, c.ID, payload) + direct send.
 //
-//      Example:
-//        func chatHandler(c *roomer.Conn, msg *roomer.Message) error {
-//            // Echo message back as direct reply
-//            reply := roomer.NewMessage(
-//                "root", "echo", msg.Src, c.ID, []byte("ack"),
-//            )
-//            if !c.TrySend(reply.Bytes()) {
-//                log.Printf("Failed to send reply to %s", msg.Src)
-//            }
-//            return nil
-//        }
-//
-// Safety
+// Concurrency & Safety
 //
 //   - All exported APIs are safe for concurrent use.
+//   - Hub uses 32-shard lock striping for high-throughput parallel execution across CPU cores.
+//   - Non-blocking sends: TrySend and internal messaging never block during broadcasts.
+//   - Deadlock-free teardown: Slow client cleanup runs asynchronously.
 //   - Connections auto-cleanup on disconnect, error, or write timeout.
 //   - Empty rooms are garbage-collected automatically.
 package roomer
