@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/joncody/roomer"
+	redisadapter "github.com/joncody/roomer/adapter/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 var index = template.Must(template.ParseFiles("examples/index.html"))
@@ -25,14 +27,49 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func getEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
 func main() {
-	// Configure structured slog text logger for readable console output
+	port := getEnv("PORT", "8080")
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+
+	// 1. Structured Logger
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
 
-	// Register custom chat event handler with structured logging
+	// 2. Connect Redis Adapter
+	rdb := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
+
+	// Test connection
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer pingCancel()
+
+	var adapter roomer.Adapter
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		logger.Warn("Could not connect to Redis; running in standalone single-node mode", "err", err)
+	} else {
+		var err error
+		adapter, err = redisadapter.New(rdb,
+			redisadapter.WithPrefix("roomer:demo:"),
+			redisadapter.WithLogger(logger),
+		)
+		if err != nil {
+			logger.Error("Failed to initialize Redis adapter", "err", err)
+			os.Exit(1)
+		}
+		logger.Info("Connected to Redis cluster", "node_id", adapter.(*redisadapter.Adapter).NodeID())
+	}
+
+	// 3. Register custom event handler
 	err := roomer.RegisterHandler("chat", func(c *roomer.Conn, msg *roomer.Message) error {
 		logger.Info("Chat message received",
 			"room", msg.Room,
@@ -47,26 +84,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1. Serve root page
+	// 4. Register HTTP Routes
 	http.HandleFunc("/", handler)
-
-	// 2. Serve core JS library files from src/ (/src/roomer.js, /src/bytecursor.js, etc.)
 	http.Handle("/src/", http.StripPrefix("/src/", http.FileServer(http.Dir("src"))))
-
-	// 3. Serve example app static files (/static/js/index.js)
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("examples/static"))))
-
-	// 4. Serve test suite (/tests/index.html, /tests/static/...)
 	http.Handle("/tests/", http.StripPrefix("/tests/", http.FileServer(http.Dir("tests"))))
 
-	// 5. WebSocket handler with structured logger configured
-	http.HandleFunc("/ws", roomer.SocketHandlerWithOptions(
+	// 5. Mount WebSocket handler
+	opts := []roomer.Option{
 		roomer.WithLogger(logger),
-	))
+	}
+	if adapter != nil {
+		opts = append(opts, roomer.WithAdapter(adapter))
+	}
+	http.HandleFunc("/ws", roomer.SocketHandlerWithOptions(opts...))
 
-	server := &http.Server{Addr: ":8080"}
+	server := &http.Server{Addr: ":" + port}
 
-	// Listen for interrupt signals (Ctrl+C, SIGTERM) to demonstrate graceful shutdown
+	// 6. Graceful Shutdown
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -82,10 +117,13 @@ func main() {
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("HTTP server shutdown error", "err", err)
 		}
+		if rdb != nil {
+			_ = rdb.Close()
+		}
 	}()
 
-	logger.Info("Server running at http://localhost:8080/")
-	logger.Info("Run test suite at http://localhost:8080/tests/")
+	logger.Info("Server running at http://localhost:" + port + "/")
+	logger.Info("Run test suite at http://localhost:" + port + "/tests/")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("Server terminated unexpectedly", "err", err)
 		os.Exit(1)

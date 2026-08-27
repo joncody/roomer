@@ -19,6 +19,7 @@ A lightweight, enterprise-grade WebSocket framework for real-time applications i
 - 🏢 **Automatic Room Management**: Create, join, and leave rooms dynamically with automatic empty-room cleanup.
 - ⚡ **Zero-Copy Binary Protocol**: Uses length-prefixed fields with direct slice decoding and single-allocation packet serialization for ultra-low latency.
 - 🌐 **Pluggable Cluster Scaling (`Adapter`)**: Multi-node horizontal scaling support across Redis, NATS, or Kafka pub/sub clusters with a zero-dependency in-memory default.
+- 🔁 **Built-in Loopback Suppression**: Distributed adapters filter node self-echoes to guarantee clients never receive duplicate messages.
 - 📊 **Production Observability (`Metrics`)**: Telemetry hooks for Prometheus and OpenTelemetry instrumenting connections, room counts, byte throughput, and drop events.
 - 🪵 **Structured Logging (`log/slog`)**: Integrated with Go 1.21+ structured logging with configurable handlers and log levels.
 - 🛑 **Graceful Draining & Shutdown**: Package-level `Shutdown(ctx)` flushes queues, sends WebSocket `1001 Going Away` close frames, and cleans up active connections within deadline contexts.
@@ -37,6 +38,11 @@ A lightweight, enterprise-grade WebSocket framework for real-time applications i
 go get github.com/joncody/roomer
 ```
 *Requires Go 1.21+.*
+
+### Optional Redis Cluster Adapter
+```bash
+go get github.com/redis/go-redis/v9
+```
 
 ### JavaScript Client
 Include these standalone files from `src/` in your frontend:
@@ -147,7 +153,68 @@ root.on("open", function () {
 
 By default, `roomer` operates in single-node mode with **zero external infrastructure dependencies**.
 
-When scaling horizontally across multiple server instances (e.g., behind a load balancer or Kubernetes ingress), pass a custom `Adapter` using `WithAdapter()`:
+When scaling horizontally across multiple server instances behind a load balancer, import the built-in Redis adapter from `adapter/redis`:
+
+```go
+package main
+
+import (
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/joncody/roomer"
+	redisadapter "github.com/joncody/roomer/adapter/redis"
+	"github.com/redis/go-redis/v9"
+)
+
+func main() {
+	// 1. Connect to Redis (supports standalone, cluster, or sentinel)
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+	})
+
+	// 2. Initialize the cluster adapter (handles loopback suppression automatically)
+	adapter, err := redisadapter.New(rdb,
+		redisadapter.WithPrefix("roomer:prod:"),
+		redisadapter.WithPublishTimeout(3 * time.Second),
+	)
+	if err != nil {
+		log.Fatalf("Failed to init redis adapter: %v", err)
+	}
+
+	// 3. Mount WebSocket handler with cluster scaling
+	http.HandleFunc("/ws", roomer.SocketHandlerWithOptions(
+		roomer.WithAdapter(adapter),
+	))
+
+	http.ListenAndServe(":8080", nil)
+}
+```
+
+### 🐳 Local Cluster Development with Docker
+
+To test multi-node clustering locally across multiple server processes:
+
+1. **Start Redis**:
+   ```bash
+   docker run -d --name roomer-redis -p 6379:6379 redis:alpine
+   ```
+
+2. **Start Node 1 (Port 8080)**:
+   ```bash
+   PORT=8080 REDIS_ADDR=localhost:6379 go run examples/main.go
+   ```
+
+3. **Start Node 2 (Port 8081)**:
+   ```bash
+   PORT=8081 REDIS_ADDR=localhost:6379 go run examples/main.go
+   ```
+
+4. Open `http://localhost:8080/` in one browser tab and `http://localhost:8081/` in another. Messages sent in room `"lobby"` will synchronize instantly across both nodes without message duplication.
+
+### Writing a Custom Adapter
+You can also implement the `roomer.Adapter` interface for NATS, Kafka, or Postgres:
 
 ```go
 type Adapter interface {
@@ -155,43 +222,6 @@ type Adapter interface {
     Subscribe(handler func(room string, msg *Message)) error
     Close() error
 }
-```
-
-### Example: Custom Redis Pub/Sub Adapter
-
-```go
-type RedisAdapter struct {
-    rdb *redis.Client
-}
-
-func (a *RedisAdapter) Publish(ctx context.Context, room string, msg *roomer.Message) error {
-    return a.rdb.Publish(ctx, "roomer:"+room, msg.Bytes()).Err()
-}
-
-func (a *RedisAdapter) Subscribe(handler func(room string, msg *roomer.Message)) error {
-    pubsub := a.rdb.PSubscribe(context.Background(), "roomer:*")
-    go func() {
-        for msg := range pubsub.Channel() {
-            roomName := strings.TrimPrefix(msg.Channel, "roomer:")
-            packet := roomer.BytesToMessage([]byte(msg.Payload))
-            if packet != nil {
-                handler(roomName, packet)
-            }
-        }
-    }()
-    return nil
-}
-
-func (a *RedisAdapter) Close() error {
-    return a.rdb.Close()
-}
-```
-
-Then attach it during startup:
-```go
-http.HandleFunc("/ws", roomer.SocketHandlerWithOptions(
-    roomer.WithAdapter(&RedisAdapter{rdb: redisClient}),
-))
 ```
 
 ---
@@ -272,6 +302,7 @@ Example:
 
 - **Lock-Striped Sharding**: Hub state is partitioned into 32 distinct shards to distribute read/write locks across CPU cores under heavy concurrent traffic.
 - **On-Demand Fanout**: Broadcasts iterate through members directly under reader locks without channel queuing overhead or dedicated per-room goroutines.
+- **Loopback Suppression**: Multi-node adapters tag packets with a binary node envelope to prevent publishers from receiving self-echoes.
 - **Deadlock-Free Asynchronous Teardown**: Slow client disconnects triggered during `TrySend` execute asynchronously, guaranteeing lock ordering integrity during broadcast loops.
 - **Zero-Copy Byte Decoding**: Slices and strings are decoded directly from raw buffers using bounds-checked offset math without memory reallocation.
 
