@@ -57,7 +57,7 @@ func DefaultConfig() Config {
 		WriteWait:       10 * time.Second,
 		PongWait:        60 * time.Second,
 		PingPeriod:      54 * time.Second,
-		ChannelCapacity: 256,
+		ChannelCapacity: 2048,
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
 		CheckOrigin:     nil, // gorilla/websocket enforces same-origin by default

@@ -1,4 +1,4 @@
-module github.com/joncody/roomer-go-go
+module github.com/joncody/roomer-go
 
 go 1.24
 

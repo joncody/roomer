@@ -1,6 +1,6 @@
 # `roomer-go` – Room-Based WebSocket Framework
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/joncody/roomer-go-go.svg)](https://pkg.go.dev/github.com/joncody/roomer-go-go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/joncody/roomer-go.svg)](https://pkg.go.dev/github.com/joncody/roomer-go)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go&logoColor=white)](https://golang.org/)
 [![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=flat&logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -98,7 +98,7 @@ stateDiagram-v2
 
 ### Go Server
 ```bash
-go get github.com/joncody/roomer-go-go
+go get github.com/joncody/roomer-go
 ```
 *Requires Go 1.21+.*
 
@@ -134,7 +134,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/joncody/roomer-go-go"
+	"github.com/joncody/roomer-go"
 )
 
 func main() {
@@ -224,8 +224,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/joncody/roomer-go-go"
-	redisadapter "github.com/joncody/roomer-go-go/adapter/redis"
+	"github.com/joncody/roomer-go"
+	redisadapter "github.com/joncody/roomer-go/adapter/redis"
 	"github.com/redis/go-redis/v9"
 )
 

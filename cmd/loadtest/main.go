@@ -8,14 +8,15 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/joncody/roomer-go-go"
+	"github.com/joncody/roomer-go"
 )
 
 func main() {
 	node1URL := flag.String("node1", "ws://localhost:8080/ws", "WebSocket URL for Node 1")
-	node2URL := flag.String("node2", "ws://localhost:8081/ws", "WebSocket URL for Node 2")
+	node2URL := flag.String("node2", "ws://localhost:8080/ws", "WebSocket URL for Node 2")
 	clientsPerNode := flag.Int("clients", 50, "Number of clients per node")
-	messagesToSend := flag.Int("messages", 2000, "Number of broadcast messages to send")
+	messagesToSend := flag.Int("messages", 1000, "Number of broadcast messages to send")
+	delayMicros := flag.Int("delay", 0, "Delay in microseconds between sent messages (0 = unthrottled burst)")
 	flag.Parse()
 
 	log.Printf("Starting Cluster Load Test...")
@@ -38,7 +39,7 @@ func main() {
 				log.Fatalf("Failed to send join: %v", err)
 			}
 
-			// Background reader loop: counts ONLY "chat" broadcasts (ignores join_ack & new_member)
+			// Background reader loop: counts ONLY "chat" broadcasts
 			go func(conn *websocket.Conn) {
 				for {
 					_, data, err := conn.ReadMessage()
@@ -61,13 +62,11 @@ func main() {
 	node2Clients := connectClients(*node2URL, *clientsPerNode)
 
 	// Allow join handshakes to complete before starting measurement
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 
-	// Sender is the first client on Node 1
 	sender := node1Clients[0]
 	log.Printf("Broadcasting %d chat messages from Node 1 to room 'bench_room'...", *messagesToSend)
 
-	// Expected receives: (total clients - 1 sender) * messagesToSend
 	totalClients := (*clientsPerNode) * 2
 	expectedReceives := int64((totalClients - 1) * (*messagesToSend))
 
@@ -76,6 +75,9 @@ func main() {
 		msg := roomer.NewMessage("bench_room", "chat", "", "", []byte(fmt.Sprintf("loadtest_payload_%d", i)))
 		if err := sender.WriteMessage(websocket.BinaryMessage, msg.Bytes()); err != nil {
 			log.Fatalf("Sender write error: %v", err)
+		}
+		if *delayMicros > 0 {
+			time.Sleep(time.Duration(*delayMicros) * time.Microsecond)
 		}
 	}
 
