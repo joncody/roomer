@@ -9,7 +9,7 @@
 [![Client Dependencies: 0](https://img.shields.io/badge/Client%20Deps-0-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-> 🦀 **Looking for the Rust implementation?** Check out [`roomer` (Rust)](https://github.com/joncody/roomer-go). Both implementations share the identical binary wire protocol and work interchangeably with the zero-dependency client.
+> 🦀 **Looking for the Rust implementation?** Check out [`roomer` (Rust)](https://github.com/joncody/roomer). Both implementations share the identical binary wire protocol and work interchangeably with the zero-dependency client.
 
 A lightweight, enterprise-grade WebSocket framework for real-time applications written in **Go** (server) and **JavaScript / TypeScript** (client). Built around **rooms**, **binary packet framing**, and **lock-striped concurrency**, `roomer` handles connection lifecycles, horizontal clustering, observability, and concurrency with first-principles systems design.
 
@@ -83,6 +83,7 @@ stateDiagram-v2
 - ⚡ **Zero-Copy Binary Protocol:** Uses length-prefixed fields with direct slice decoding and single-allocation packet serialization for ultra-low latency.
 - 🌐 **Pluggable Cluster Scaling (`Adapter`):** Multi-node horizontal scaling support across Redis pub/sub clusters with a zero-dependency in-memory default.
 - 🔁 **Built-in Loopback Suppression:** Distributed adapters filter node self-echoes with binary node envelopes to guarantee clients never receive duplicate messages.
+- 🔄 **Resilient Redis Streaming:** Automatic exponential backoff and jittered reconnects ensure pub/sub streams recover from network partitions without dropping server instances.
 - 📊 **Production Observability (`Metrics`):** Telemetry hooks for Prometheus and OpenTelemetry instrumenting connections, room counts, byte throughput, and drop events.
 - 🪵 **Structured Logging (`log/slog`):** Integrated with Go 1.21+ structured logging with configurable handlers and log levels.
 - 🛑 **Graceful Draining & Shutdown:** Package-level `Shutdown(ctx)` flushes queues, sends WebSocket `1001 Going Away` close frames, and cleans up active connections within deadline contexts.
@@ -114,7 +115,7 @@ Include these standalone files from `src/` in your frontend:
 - `src/emitter.js` (and `src/emitter.d.ts`)
 
 ```javascript
-import roomer from "./roomer.js";
+import roomer from "./src/roomer.js";
 ```
 
 ---
@@ -182,7 +183,7 @@ func main() {
 
 ### 2. Frontend Client (JavaScript / TypeScript)
 ```javascript
-import roomer from "./roomer.js";
+import roomer from "./src/roomer.js";
 
 const decoder = new TextDecoder("utf-8");
 const root = roomer("ws://localhost:8080/ws", { reconnect: true });
@@ -276,7 +277,7 @@ const root = roomer(url: string, options?: RoomerOptions): Room;
 | `.leave()` | Leaves room and notifies server. |
 | `.send(event, payload?, dst?)` | Sends message packet (to room or direct to `dst`). |
 | `.clearListeners([exceptions])` | Removes event listeners except those in `exceptions`. |
-| `.forceClose()` | Forcefully closes room locally and emits `"close"`. |
+| `.forceClose(is_disconnect?)` | Forcefully closes room locally and emits `"close"`. |
 | `.purge()` *(root only)* | Leaves all non-root rooms simultaneously. |
 | `.rooms()` *(root only)* | Returns dictionary of all active room instances. |
 
@@ -299,7 +300,7 @@ const root = roomer(url: string, options?: RoomerOptions): Room;
 | `c.ID` | Unique connection UUID string. |
 | `c.Claims` | Map of authenticated claims (e.g., from JWT / HTTP request). |
 | `c.SendToRoom(room, event string, payload []byte)` | Broadcasts to all room members **except sender**. |
-| `c.SendToClient(dstID, event string, payload []byte)` | Sends direct message to another client ID. |
+| `c.SendToClient(dstID, event string, payload []byte)` | Sends direct message to another client ID (routes locally or across cluster). |
 | `c.TrySend(msg []byte) bool` | Sends raw message to self (non-blocking; tears down slow clients asynchronously). |
 | `c.IsInRoom(room string) bool` | Checks if connection is currently in a room. |
 

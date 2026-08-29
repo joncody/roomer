@@ -18,7 +18,7 @@ import (
 // Ensure Adapter implements roomer.Adapter at compile time.
 var _ roomer.Adapter = (*Adapter)(nil)
 
-// Adapter implements roomer.Adapter using Redis Pub/Sub with loopback suppression.
+// Adapter implements roomer.Adapter using Redis Pub/Sub with loopback suppression and auto-reconnect.
 type Adapter struct {
 	client         goredis.UniversalClient
 	nodeID         string
@@ -179,7 +179,7 @@ func (a *Adapter) Publish(ctx context.Context, room string, msg *roomer.Message)
 }
 
 // Subscribe listens to all room channels matching the prefix (e.g. "roomer:*")
-// and dispatches incoming messages to local room connections.
+// with automatic exponential backoff and jittered reconnects.
 func (a *Adapter) Subscribe(handler func(room string, msg *roomer.Message)) error {
 	if handler == nil {
 		return errors.New("subscriber handler cannot be nil")
@@ -210,24 +210,97 @@ func (a *Adapter) Subscribe(handler func(room string, msg *roomer.Message)) erro
 	a.pubsub = pubsub
 	a.subWg.Add(1)
 
-	go a.listenLoop(pubsub, handler)
+	go a.listenLoop(handler)
 	return nil
 }
 
-func (a *Adapter) listenLoop(pubsub *goredis.PubSub, handler func(room string, msg *roomer.Message)) {
+func (a *Adapter) listenLoop(handler func(room string, msg *roomer.Message)) {
 	defer a.subWg.Done()
-	ch := pubsub.Channel()
+	pattern := a.prefix + "*"
 
 	for {
-		select {
-		case <-a.subCtx.Done():
+		a.subMu.Lock()
+		if a.isClosed {
+			a.subMu.Unlock()
 			return
-		case m, ok := <-ch:
-			if !ok {
-				return
-			}
-			a.handleIncoming(m, handler)
 		}
+		pubsub := a.pubsub
+		a.subMu.Unlock()
+
+		if pubsub == nil {
+			return
+		}
+
+		ch := pubsub.Channel()
+		streamEnded := false
+
+		for !streamEnded {
+			select {
+			case <-a.subCtx.Done():
+				return
+			case m, ok := <-ch:
+				if !ok {
+					streamEnded = true
+					break
+				}
+				a.handleIncoming(m, handler)
+			}
+		}
+
+		// Reconnection loop with exponential backoff and jitter
+		if a.logger != nil {
+			a.logger.Warn("Redis pub/sub stream terminated unexpectedly. Attempting reconnect...")
+		}
+
+		backoff := 200 * time.Millisecond
+		maxBackoff := 5 * time.Second
+
+		for {
+			select {
+			case <-a.subCtx.Done():
+				return
+			case <-time.After(backoff):
+				a.subMu.Lock()
+				if a.isClosed {
+					a.subMu.Unlock()
+					return
+				}
+
+				if a.pubsub != nil {
+					_ = a.pubsub.Close()
+				}
+
+				newPubSub := a.client.PSubscribe(a.subCtx, pattern)
+				initCtx, cancel := context.WithTimeout(a.subCtx, 5*time.Second)
+				_, err := newPubSub.Receive(initCtx)
+				cancel()
+
+				if err == nil {
+					a.pubsub = newPubSub
+					a.subMu.Unlock()
+					if a.logger != nil {
+						a.logger.Info("Successfully reconnected and re-subscribed to Redis cluster", "pattern", pattern)
+					}
+					goto StreamActive
+				}
+
+				_ = newPubSub.Close()
+				a.subMu.Unlock()
+
+				if a.logger != nil {
+					a.logger.Warn("Failed to reconnect to Redis pub/sub, retrying...", "err", err)
+				}
+
+				jitter := time.Duration(time.Now().UnixNano()%150) * time.Millisecond
+				backoff = backoff * 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				backoff += jitter
+			}
+		}
+
+	StreamActive:
 	}
 }
 

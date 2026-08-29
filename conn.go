@@ -107,15 +107,17 @@ func (c *Conn) SendToRoom(roomName, event string, payload []byte) {
 	}
 }
 
-// SendToClient sends a direct message to another client by connection ID.
+// SendToClient sends a direct message to another client by connection ID (routes locally or across cluster).
 func (c *Conn) SendToClient(dstID, event string, payload []byte) {
 	msg := NewMessage("root", event, dstID, c.ID, payload)
 	if dst, ok := c.hub.getConn(dstID); ok {
 		dst.TrySend(msg.Bytes())
+	} else {
+		c.hub.publishToCluster("root", msg)
 	}
 }
 
-// dispatch routes an incoming message to handlers or rooms.
+// dispatch routes an incoming message to handlers, direct recipients, or rooms.
 func (c *Conn) dispatch(msg *Message) {
 	select {
 	case <-c.done:
@@ -144,10 +146,12 @@ func (c *Conn) dispatch(msg *Message) {
 		c.TrySend(ack)
 
 	default:
-		// Direct targeted messaging
+		// Direct targeted messaging (local or cross-node)
 		if msg.Dst != "" {
 			if dst, ok := c.hub.getConn(msg.Dst); ok {
 				dst.TrySend(msg.Bytes())
+			} else {
+				c.hub.publishToCluster("root", msg)
 			}
 			return
 		}

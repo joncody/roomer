@@ -70,6 +70,15 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 	if adapter != nil {
 		h.adapter = adapter
 		_ = h.adapter.Subscribe(func(roomName string, msg *Message) {
+			// Cross-node direct messaging
+			if msg.Dst != "" {
+				if dst, ok := h.getConn(msg.Dst); ok {
+					dst.TrySend(msg.Bytes())
+				}
+				return
+			}
+
+			// Local room fanout
 			if r, ok := h.getRoom(roomName); ok {
 				r.emitLocal(msg)
 			}
