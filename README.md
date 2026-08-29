@@ -53,14 +53,26 @@ sequenceDiagram
 ### 3. Client Connection & Dynamic Room Lifecycle
 ```mermaid
 stateDiagram-v2
-    [*] --> Disconnected
-    Disconnected --> Connected: WebSocket Handshake & Join Root
-    Connected --> InRoom: Join Room (join_ack)
-    InRoom --> Fanout: Send Message
-    Fanout --> InRoom: Non-blocking Broadcast
-    InRoom --> InRoom: Member Join or Leave Event
-    InRoom --> Connected: Leave Room (leave_ack)
-    Connected --> Disconnected: Socket Close or Server Shutdown (1001)
+    direction TB
+
+    [*] --> RootConnection: 1. WebSocket Upgrade (Auto-joins "root")
+
+    state RootConnection {
+        direction TB
+        [*] --> ActiveRoot
+        ActiveRoot --> ActiveRoot: • Direct Messages (dst_id)<br/>• Server RPC (e.g. "ping")<br/>• Global Broadcasts
+    }
+
+    RootConnection --> InScopedRoom: 2. root.join("lobby") / join_ack
+
+    state InScopedRoom {
+        direction TB
+        [*] --> Subscribed
+        Subscribed --> Subscribed: • Room Fanout Broadcasts<br/>• Presence (new_member / member_left)
+    }
+
+    InScopedRoom --> RootConnection: 3. lobby.leave() / leave_ack
+    RootConnection --> [*]: 4. Socket Close / Shutdown (1001)
 ```
 
 ---
