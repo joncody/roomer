@@ -20,7 +20,7 @@ export interface RoomerOptions {
 export interface Room extends EventEmitter {
     readonly name: string;
     clearListeners(exceptions?: string[]): Room;
-    forceClose(): Room;
+    forceClose(is_disconnect?: boolean): Room;
     id(): string;
     join(room_name: string): Room;
     leave(): Room;

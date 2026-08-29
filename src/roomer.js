@@ -175,7 +175,7 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
  *     The room channel name.
  * @property {(exceptions?: string[]) => Room} clearListeners
  *     Removes registered event listeners except those in exceptions.
- * @property {() => Room} forceClose
+ * @property {(is_disconnect?: boolean) => Room} forceClose
  *     Forces the room to close locally and clears member state.
  * @property {() => string} id
  *     Returns the client ID assigned to this connection.
@@ -254,15 +254,14 @@ function roomer(url, options) {
 
             // Re-join previously active rooms upon reconnect
             Object.keys(rooms).forEach(function (r_name) {
-                if (r_name !== "root" && rooms[r_name].open() === true) {
-                    const member_id = rooms[r_name].id();
+                if (r_name !== "root") {
                     socket.send(
                         new_message(
                             r_name,
                             "join",
-                            member_id,
-                            member_id,
-                            member_id
+                            "",
+                            "",
+                            ""
                         )
                     );
                 }
@@ -296,11 +295,12 @@ function roomer(url, options) {
         };
 
         socket.onclose = function () {
+            const is_reconnecting = (manual_close === false && opts.reconnect === true);
             Object.keys(rooms).forEach(function (r_name) {
-                rooms[r_name].forceClose();
+                rooms[r_name].forceClose(is_reconnecting);
             });
 
-            if (manual_close === false && opts.reconnect === true) {
+            if (is_reconnecting === true) {
                 const jitter = Math.random() * 200;
                 setTimeout(function () {
                     reconnect_delay = Math.min(
@@ -362,15 +362,18 @@ function roomer(url, options) {
         /**
          * Closes the room locally and clears all tracked state.
          *
+         * @param {boolean} [is_disconnect=false] - Whether this close is due to socket drop.
          * @returns {Room} The room instance.
          */
-        function forceClose() {
+        function forceClose(is_disconnect) {
             if (is_open === true) {
                 is_open = false;
                 members.length = 0;
-                member_id = "";
                 self.emit("close");
-                delete rooms[name];
+                if (is_disconnect !== true) {
+                    member_id = "";
+                    delete rooms[name];
+                }
             }
             return self;
         }
