@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -30,7 +31,7 @@ type Hub struct {
 	cfgMu      sync.RWMutex
 }
 
-// getShardIndex computes an FNV-1a hash index for key partitioning.
+// getShardIndex computes an FNV-1a hash index for key partitioning across shards.
 func getShardIndex(key string) uint32 {
 	var h uint32 = 2166136261
 	for i := 0; i < len(key); i++ {
@@ -40,7 +41,8 @@ func getShardIndex(key string) uint32 {
 	return h % shardCount
 }
 
-func newHub() *Hub {
+// NewHub constructs a new independent Hub coordinator.
+func NewHub() *Hub {
 	h := &Hub{
 		adapter: newLocalAdapter(),
 		metrics: NopMetrics{},
@@ -53,11 +55,16 @@ func newHub() *Hub {
 	return h
 }
 
-// Global hub instance
-var hub = newHub()
+// Global default hub instance.
+var defaultHub = NewHub()
 
-// configure initializes telemetry, logger, and distributed adapter subscribers.
-func (h *Hub) configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
+// DefaultHub returns the singleton package-level Hub instance.
+func DefaultHub() *Hub {
+	return defaultHub
+}
+
+// Configure initializes telemetry, logger, and distributed adapter subscribers.
+func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	if adapter != nil {
@@ -85,7 +92,7 @@ func (h *Hub) getConn(id string) (*Conn, bool) {
 	return c, ok
 }
 
-// addConn adds a new connection to the hub and tracks connection metrics.
+// addConn adds a new connection to the hub and tracks metrics.
 func (h *Hub) addConn(c *Conn) {
 	shard := &h.connShards[getShardIndex(c.ID)]
 	shard.mu.Lock()
@@ -96,15 +103,19 @@ func (h *Hub) addConn(c *Conn) {
 	}
 }
 
-// removeConn removes a connection from the hub and tracks disconnection metrics.
+// removeConn removes a connection from the hub and tracks metrics.
 func (h *Hub) removeConn(id string) {
 	shard := &h.connShards[getShardIndex(id)]
 	shard.mu.Lock()
-	delete(shard.conns, id)
-	shard.mu.Unlock()
-	if h.metrics != nil {
-		h.metrics.OnDisconnect()
+	if _, ok := shard.conns[id]; ok {
+		delete(shard.conns, id)
+		shard.mu.Unlock()
+		if h.metrics != nil {
+			h.metrics.OnDisconnect()
+		}
+		return
 	}
+	shard.mu.Unlock()
 }
 
 // getRoom returns a room by name, if it exists.
@@ -140,16 +151,18 @@ func (h *Hub) joinRoom(name string, c *Conn) {
 		return
 	default:
 	}
+
 	shard := &h.roomShards[getShardIndex(name)]
 	shard.mu.Lock()
 	r, ok := shard.rooms[name]
 	if !ok {
-		r = newRoom(name)
+		r = newRoom(name, h)
 		shard.rooms[name] = r
 		if h.metrics != nil {
 			h.metrics.OnRoomCreated(name)
 		}
 	}
+
 	if c.trackRoom(name) {
 		r.addMember(c)
 		shard.mu.Unlock()
@@ -184,7 +197,27 @@ func (h *Hub) leaveAllRooms(c *Conn) {
 	}
 }
 
-// Shutdown gracefully drains active connections, sends WebSocket Close frames, and terminates adapters.
+// publishToCluster publishes an outbound room message to the distributed cluster adapter.
+func (h *Hub) publishToCluster(roomName string, msg *Message) {
+	h.cfgMu.RLock()
+	adapter := h.adapter
+	metrics := h.metrics
+	h.cfgMu.RUnlock()
+
+	if adapter != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := adapter.Publish(ctx, roomName, msg); err == nil {
+				if metrics != nil {
+					metrics.OnClusterPublish(len(msg.Payload))
+				}
+			}
+		}()
+	}
+}
+
+// Shutdown gracefully drains active connections, sends WebSocket Close frames (1001), and terminates adapters.
 func (h *Hub) Shutdown(ctx context.Context) error {
 	var conns []*Conn
 	for i := 0; i < shardCount; i++ {
@@ -216,8 +249,11 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-done:
-		if h.adapter != nil {
-			return h.adapter.Close()
+		h.cfgMu.RLock()
+		adapter := h.adapter
+		h.cfgMu.RUnlock()
+		if adapter != nil {
+			return adapter.Close()
 		}
 		return nil
 	case <-ctx.Done():

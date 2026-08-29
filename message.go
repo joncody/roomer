@@ -2,9 +2,15 @@ package roomer
 
 import (
 	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"unicode/utf8"
 )
 
-// Message represents a length-prefixed binary message for efficient parsing.
+// Message represents a length-prefixed binary message frame.
+//
+// Wire format:
+// [4B room_len][room][4B event_len][event][4B dst_len][dst][4B src_len][src][4B payload_len][payload]
 type Message struct {
 	RoomLength    int
 	Room          string
@@ -18,7 +24,7 @@ type Message struct {
 	Payload       []byte
 }
 
-// readString reads a 4-byte big-endian length-prefixed string from slice without cursor corruption on invalid input.
+// readString reads a 4-byte big-endian length-prefixed UTF-8 string from a byte slice.
 func readString(data []byte, offset *int) (string, int, bool) {
 	if len(data)-*offset < 4 {
 		return "", 0, false
@@ -28,12 +34,16 @@ func readString(data []byte, offset *int) (string, int, bool) {
 	if length < 0 || len(data)-*offset < length {
 		return "", 0, false
 	}
-	str := string(data[*offset : *offset+length])
+	strBytes := data[*offset : *offset+length]
+	if !utf8.Valid(strBytes) {
+		return "", 0, false
+	}
+	str := string(strBytes)
 	*offset += length
 	return str, length, true
 }
 
-// readPayload reads a 4-byte big-endian length-prefixed byte slice from slice without cursor corruption on invalid input.
+// readPayload reads a 4-byte big-endian length-prefixed raw byte slice from data.
 func readPayload(data []byte, offset *int) ([]byte, int, bool) {
 	if len(data)-*offset < 4 {
 		return nil, 0, false
@@ -48,7 +58,7 @@ func readPayload(data []byte, offset *int) ([]byte, int, bool) {
 	return payload, length, true
 }
 
-// BytesToMessage decodes raw bytes into a Message (returns nil on malformed input).
+// BytesToMessage decodes raw binary bytes into a Message. Returns nil on malformed input.
 func BytesToMessage(data []byte) *Message {
 	if len(data) < 20 {
 		return nil
@@ -77,7 +87,7 @@ func BytesToMessage(data []byte) *Message {
 	return msg
 }
 
-// Bytes serializes the Message into a binary format with length prefixes.
+// Bytes serializes the Message into contiguous binary bytes with exact pre-allocation.
 func (msg *Message) Bytes() []byte {
 	totalLen := 20 + len(msg.Room) + len(msg.Event) + len(msg.Dst) + len(msg.Src) + len(msg.Payload)
 	buf := make([]byte, totalLen)
@@ -106,7 +116,20 @@ func (msg *Message) Bytes() []byte {
 	return buf
 }
 
-// NewMessage builds a new Message with computed length fields.
+// PayloadString returns the payload as a string.
+func (msg *Message) PayloadString() string {
+	return string(msg.Payload)
+}
+
+// PayloadJSON unmarshals the message payload into the given target interface.
+func (msg *Message) PayloadJSON(v any) error {
+	if len(msg.Payload) == 0 {
+		return errors.New("empty payload")
+	}
+	return json.Unmarshal(msg.Payload, v)
+}
+
+// NewMessage constructs a new Message instance.
 func NewMessage(room, event, dst, src string, payload []byte) *Message {
 	return &Message{
 		RoomLength:    len(room),
@@ -120,4 +143,18 @@ func NewMessage(room, event, dst, src string, payload []byte) *Message {
 		PayloadLength: len(payload),
 		Payload:       payload,
 	}
+}
+
+// NewTextMessage constructs a new Message with a plain-text payload.
+func NewTextMessage(room, event, dst, src, text string) *Message {
+	return NewMessage(room, event, dst, src, []byte(text))
+}
+
+// NewJSONMessage constructs a new Message with a JSON-encoded payload.
+func NewJSONMessage(room, event, dst, src string, v any) (*Message, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return NewMessage(room, event, dst, src, data), nil
 }

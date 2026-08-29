@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/joncody/roomer"
+	"github.com/joncody/roomer-go-go"
 )
 
 func main() {

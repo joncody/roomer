@@ -1,15 +1,24 @@
 package roomer
 
 import (
-	"context"
 	"sync"
 )
 
 // room manages a group of connections with concurrent-safe operations.
 type room struct {
 	Name    string
+	hub     *Hub
 	members map[string]*Conn
-	mu      sync.RWMutex // Protects member list
+	mu      sync.RWMutex
+}
+
+// newRoom creates a new room instance linked to its owning hub.
+func newRoom(name string, h *Hub) *room {
+	return &room{
+		Name:    name,
+		hub:     h,
+		members: make(map[string]*Conn),
+	}
 }
 
 // addMember adds a connection to the room under write lock.
@@ -27,34 +36,20 @@ func (r *room) removeMember(c *Conn) bool {
 	return len(r.members) == 0
 }
 
-// join adds a connection to the room and notifies others of new member.
-func (r *room) join(c *Conn) {
-	r.addMember(c)
-	r.emit(c, NewMessage(r.Name, "new_member", "", "", []byte(c.ID)))
-}
-
-// leave removes a connection and notifies others; removes room from hub if empty.
-func (r *room) leave(c *Conn) {
-	if r.removeMember(c) {
-		hub.removeRoom(r)
-	}
-	r.emit(c, NewMessage(r.Name, "member_left", "", "", []byte(c.ID)))
-}
-
 // emit broadcasts a message to local room members and publishes to the distributed cluster adapter.
-func (r *room) emit(c *Conn, msg *Message) {
+func (r *room) emit(sender *Conn, msg *Message) {
 	data := msg.Bytes()
 	r.mu.RLock()
 	for id, member := range r.members {
-		if c == nil || id != c.ID {
+		if sender == nil || id != sender.ID {
 			member.TrySend(data)
 		}
 	}
 	r.mu.RUnlock()
 
-	// Publish to multi-node cluster adapter if configured
-	if hub.adapter != nil {
-		_ = hub.adapter.Publish(context.Background(), r.Name, msg)
+	// Publish to cluster adapter asynchronously without blocking broadcast loop
+	if r.hub != nil {
+		r.hub.publishToCluster(r.Name, msg)
 	}
 }
 
@@ -88,10 +83,9 @@ func (r *room) isEmpty() bool {
 	return len(r.members) == 0
 }
 
-// newRoom creates a new room instance.
-func newRoom(name string) *room {
-	return &room{
-		Name:    name,
-		members: make(map[string]*Conn),
-	}
+// len returns the member count.
+func (r *room) len() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.members)
 }

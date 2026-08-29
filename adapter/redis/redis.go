@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/joncody/roomer"
+	"github.com/joncody/roomer-go-go"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -80,8 +80,7 @@ func WithPublishTimeout(d time.Duration) Option {
 	}
 }
 
-// New creates a new Redis clustering adapter from any go-redis UniversalClient
-// (*goredis.Client, *goredis.ClusterClient, or *goredis.Ring).
+// New creates a new Redis clustering adapter from any go-redis UniversalClient.
 func New(client goredis.UniversalClient, opts ...Option) (*Adapter, error) {
 	if client == nil {
 		return nil, errors.New("redis client cannot be nil")
@@ -111,7 +110,7 @@ func New(client goredis.UniversalClient, opts ...Option) (*Adapter, error) {
 	return a, nil
 }
 
-// NewFromURL connects to Redis using a connection string (e.g. "redis://localhost:6379/0").
+// NewFromURL connects to Redis using a connection URL (e.g. "redis://localhost:6379/0").
 func NewFromURL(redisURL string, opts ...Option) (*Adapter, error) {
 	opt, err := goredis.ParseURL(redisURL)
 	if err != nil {
@@ -133,6 +132,29 @@ func (a *Adapter) NodeID() string {
 	return a.nodeID
 }
 
+// EncodeEnvelope packs a node ID and raw message into a binary envelope.
+func EncodeEnvelope(nodeID string, rawMsg []byte) []byte {
+	nodeBytes := []byte(nodeID)
+	env := make([]byte, 4+len(nodeBytes)+len(rawMsg))
+	binary.BigEndian.PutUint32(env[0:4], uint32(len(nodeBytes)))
+	copy(env[4:], nodeBytes)
+	copy(env[4+len(nodeBytes):], rawMsg)
+	return env
+}
+
+// DecodeEnvelope extracts the sender node ID and raw message from an envelope.
+func DecodeEnvelope(payload []byte) (string, []byte, bool) {
+	if len(payload) < 4 {
+		return "", nil, false
+	}
+	nodeIDLen := int(binary.BigEndian.Uint32(payload[0:4]))
+	if nodeIDLen <= 0 || len(payload) < 4+nodeIDLen {
+		return "", nil, false
+	}
+	senderNodeID := string(payload[4 : 4+nodeIDLen])
+	return senderNodeID, payload[4+nodeIDLen:], true
+}
+
 // Publish broadcasts an enveloped binary message to the Redis channel for the room.
 func (a *Adapter) Publish(ctx context.Context, room string, msg *roomer.Message) error {
 	if msg == nil {
@@ -141,12 +163,7 @@ func (a *Adapter) Publish(ctx context.Context, room string, msg *roomer.Message)
 
 	channel := a.prefix + room
 	rawMsg := msg.Bytes()
-
-	// Binary Envelope: [4-byte NodeID length][NodeID bytes][Raw Message bytes]
-	envelope := make([]byte, 4+len(a.nodeIDBytes)+len(rawMsg))
-	binary.BigEndian.PutUint32(envelope[0:4], uint32(len(a.nodeIDBytes)))
-	copy(envelope[4:], a.nodeIDBytes)
-	copy(envelope[4+len(a.nodeIDBytes):], rawMsg)
+	envelope := EncodeEnvelope(a.nodeID, rawMsg)
 
 	pubCtx := ctx
 	if pubCtx == nil {
@@ -181,7 +198,7 @@ func (a *Adapter) Subscribe(handler func(room string, msg *roomer.Message)) erro
 	pattern := a.prefix + "*"
 	pubsub := a.client.PSubscribe(a.subCtx, pattern)
 
-	// Wait for subscription confirmation with a 5s timeout
+	// Wait for subscription confirmation with timeout
 	initCtx, cancel := context.WithTimeout(a.subCtx, 5*time.Second)
 	defer cancel()
 
@@ -216,24 +233,18 @@ func (a *Adapter) listenLoop(pubsub *goredis.PubSub, handler func(room string, m
 
 func (a *Adapter) handleIncoming(m *goredis.Message, handler func(room string, msg *roomer.Message)) {
 	payload := []byte(m.Payload)
-	if len(payload) < 4 {
+	senderNodeID, rawMsg, ok := DecodeEnvelope(payload)
+	if !ok {
 		return
 	}
 
-	nodeIDLen := int(binary.BigEndian.Uint32(payload[0:4]))
-	if nodeIDLen <= 0 || len(payload) < 4+nodeIDLen {
-		return
-	}
-
-	senderNodeID := string(payload[4 : 4+nodeIDLen])
-
-	// Loopback Prevention: Drop messages originating from our own node instance
+	// Loopback Prevention: Drop messages originating from self
 	if senderNodeID == a.nodeID {
 		return
 	}
 
-	// Decode the actual roomer packet
-	packet := roomer.BytesToMessage(payload[4+nodeIDLen:])
+	// Decode the roomer packet
+	packet := roomer.BytesToMessage(rawMsg)
 	if packet == nil {
 		if a.logger != nil {
 			a.logger.Warn("Redis adapter received malformed message", "channel", m.Channel)

@@ -1,6 +1,9 @@
 /**
- * @fileoverview WebSocket-based multi-room messaging client library
- * using binary packet framing with bytecursor and emitter mixins.
+ * @fileoverview High-performance, room-based WebSocket client library with
+ * zero-copy binary framing, event-driven subscription channels, and
+ * automatic exponential backoff reconnection.
+ *
+ * @license MIT
  */
 
 import bytecursor from "./bytecursor.js";
@@ -19,10 +22,12 @@ const decoder = new TextDecoder("utf-8");
 const encoder = new TextEncoder();
 
 /**
- * Internal event names reserved by the roomer protocol.
- * @type {string[]}
+ * Internal protocol event names reserved by the roomer framework.
+ * Handlers for these names cannot be emitted or overridden directly
+ * via `.send()`.
+ * @type {readonly string[]}
  */
-const reserved_events = [
+const reserved_events = Object.freeze([
     "close",
     "join",
     "join_ack",
@@ -31,13 +36,13 @@ const reserved_events = [
     "member_left",
     "new_member",
     "open"
-];
+]);
 
 /**
- * Checks whether a value is an ArrayBuffer.
+ * Checks whether a given value is an ArrayBuffer.
  *
- * @param {*} value - The value to check.
- * @returns {boolean} True if the value is an ArrayBuffer, false otherwise.
+ * @param {*} value - Value to validate.
+ * @returns {boolean} True if value is an ArrayBuffer, false otherwise.
  */
 function is_array_buffer(value) {
     return (
@@ -48,14 +53,17 @@ function is_array_buffer(value) {
 }
 
 /**
- * Serializes a message packet into binary format using bytecursor.
+ * Serializes message parameters into a length-prefixed binary packet.
  *
- * @param {string} room_name - Target room name.
- * @param {string} event_name - Name of the event to send.
- * @param {string} dst_id - Destination client ID.
- * @param {string} src_id - Source client ID.
- * @param {*} payload_data - Message payload data (string, buffer, object).
- * @returns {Uint8Array} Serialized binary packet data.
+ * Wire Format:
+ * [4B room_len][room][4B event_len][event]...
+ *
+ * @param {string} room_name - Destination room channel name.
+ * @param {string} event_name - Message event name.
+ * @param {string} dst_id - Destination client ID (or empty string).
+ * @param {string} src_id - Origin client ID.
+ * @param {*} payload_data - Payload data (string, buffer, object).
+ * @returns {Uint8Array} Contiguous serialized binary packet data.
  */
 function new_message(room_name, event_name, dst_id, src_id, payload_data) {
     let dst = dst_id;
@@ -144,62 +152,177 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
 
 /**
  * @typedef {Object} Packet
- * @property {string} dst - Destination client ID.
- * @property {string} event - Event name.
- * @property {Uint8Array} payload - Binary message payload.
- * @property {string} room - Room name.
- * @property {string} src - Source client ID.
+ * @property {string} dst - Targeted destination client ID.
+ * @property {string} event - Event descriptor name.
+ * @property {Uint8Array} payload - Raw binary payload data.
+ * @property {string} room - Channel or room name.
+ * @property {string} src - Source client ID of the sender.
+ */
+
+/**
+ * @typedef {Object} RoomerOptions
+ * @property {boolean} [reconnect=true]
+ *     Whether to automatically reconnect on connection drop.
+ * @property {number} [initial_delay=500]
+ *     Initial reconnection backoff delay in milliseconds.
+ * @property {number} [max_delay=5000]
+ *     Maximum reconnection backoff ceiling in milliseconds.
  */
 
 /**
  * @typedef {Object} Room
- * @property {(exceptions?: string[]) => Room} clearListeners
- *     Clears event listeners except for optional exceptions list.
- * @property {() => Room} forceClose
- *     Forces room closure and cleans up room state.
- * @property {() => string} id
- *     Returns the client ID assigned within the room.
- * @property {(room_name: string) => Room} join
- *     Joins another room on the same connection.
- * @property {() => Room} leave
- *     Leaves the current room.
- * @property {() => string[]} members
- *     Returns a copy of the list of current room member IDs.
  * @property {string} name
- *     The room name.
+ *     The room channel name.
+ * @property {(exceptions?: string[]) => Room} clearListeners
+ *     Removes registered event listeners except those in exceptions.
+ * @property {() => Room} forceClose
+ *     Forces the room to close locally and clears member state.
+ * @property {() => string} id
+ *     Returns the client ID assigned to this connection.
+ * @property {(room_name: string) => Room} join
+ *     Subscribes to a new room over the WebSocket connection.
+ * @property {() => Room} leave
+ *     Leaves the room and notifies the server.
+ * @property {() => string[]} members
+ *     Returns a shallow copy array of all active member IDs.
  * @property {() => boolean} open
- *     Returns whether the room connection is open.
+ *     Returns whether the room connection is active.
  * @property {(packet: Packet) => void} parse
- *     Parses an incoming packet and dispatches room events.
+ *     Parses an incoming binary packet and dispatches events.
  * @property {() => Room} [purge]
- *     Leaves all non-root rooms (root room only).
- * @property {() => Object.<string, Room>} [rooms]
- *     Returns a copy of all active room instances (root room only).
+ *     Leaves all non-root rooms simultaneously (root only).
+ * @property {() => Readonly<Object.<string, Room>>} [rooms]
+ *     Returns a read-only map of all active room instances.
  * @property {(event: string, payload?: *, dst?: string) => Room} send
- *     Sends a message packet to the room or a specific recipient.
+ *     Sends a message packet to the room or directly to a member.
+ * @property {(type: string, fn: Function) => Room} on
+ *     Subscribes a listener callback to an event.
+ * @property {(type: string, fn: Function) => Room} once
+ *     Subscribes a one-time listener callback to an event.
+ * @property {(type: string, fn: Function) => Room} off
+ *     Unsubscribes a listener callback from an event.
+ * @property {(type: string, ...args: *) => boolean} emit
+ *     Synchronously invokes listener callbacks for an event.
+ * @property {(type?: string) => Room} removeAllListeners
+ *     Removes all listeners or those for a specified event.
+ * @property {(type?: string) => Function[]} listeners
+ *     Returns an array of listeners for an event type.
  */
 
 /**
- * Initializes a WebSocket client and returns the root room interface.
+ * Initializes a roomer WebSocket connection and returns root room.
  *
  * @param {string} url - WebSocket server endpoint URL.
- * @throws {TypeError} If url is not a string.
- * @returns {Room} Root room instance for managing connections.
+ * @param {RoomerOptions} [options] - Reconnection options.
+ * @throws {TypeError} If the url parameter is not a string.
+ * @returns {Room} The root room client instance.
  */
-function roomer(url) {
+function roomer(url, options) {
     if (typeof url !== "string") {
         throw new TypeError("WebSocket URL must be a string.");
     }
 
+    /** @type {Required<RoomerOptions>} */
+    const opts = Object.assign({
+        initial_delay: 500,
+        max_delay: 5000,
+        reconnect: true
+    }, options);
+
+    /** @type {Object.<string, Room>} */
     const rooms = Object.create(null);
+
+    /** @type {WebSocket|undefined} */
     let socket;
+    let manual_close = false;
+    let reconnect_delay = opts.initial_delay;
 
     /**
-     * Retrieves or creates a room instance by name.
+     * Establishes the WebSocket connection and sets up binary handlers.
+     * @returns {void}
+     */
+    function connect() {
+        if (WebSocket === undefined) {
+            return;
+        }
+
+        socket = new WebSocket(url);
+        socket.binaryType = "arraybuffer";
+
+        socket.onopen = function () {
+            reconnect_delay = opts.initial_delay;
+
+            // Re-join previously active rooms upon reconnect
+            Object.keys(rooms).forEach(function (r_name) {
+                if (r_name !== "root" && rooms[r_name].open() === true) {
+                    const member_id = rooms[r_name].id();
+                    socket.send(
+                        new_message(
+                            r_name,
+                            "join",
+                            member_id,
+                            member_id,
+                            member_id
+                        )
+                    );
+                }
+            });
+        };
+
+        socket.onmessage = function (e) {
+            try {
+                const data = bytecursor(e.data);
+                const room_str = data.getString(data.getUint32());
+                const event_str = data.getString(data.getUint32());
+                const dst_str = data.getString(data.getUint32());
+                const src_str = data.getString(data.getUint32());
+                const payload_bytes = data.getBytes(data.getUint32());
+
+                /** @type {Packet} */
+                const packet = {
+                    dst: dst_str,
+                    event: event_str,
+                    payload: payload_bytes,
+                    room: room_str,
+                    src: src_str
+                };
+
+                if (rooms[packet.room] !== undefined) {
+                    rooms[packet.room].parse(packet);
+                }
+            } catch (err) {
+                console.error("Failed to parse binary WebSocket frame: ", err);
+            }
+        };
+
+        socket.onclose = function () {
+            Object.keys(rooms).forEach(function (r_name) {
+                rooms[r_name].forceClose();
+            });
+
+            if (manual_close === false && opts.reconnect === true) {
+                const jitter = Math.random() * 200;
+                setTimeout(function () {
+                    reconnect_delay = Math.min(
+                        reconnect_delay * 1.5,
+                        opts.max_delay
+                    );
+                    connect();
+                }, reconnect_delay + jitter);
+            }
+        };
+
+        socket.onerror = function (err) {
+            console.error("Roomer WebSocket error: ", err);
+        };
+    }
+
+    /**
+     * Retrieves or instantiates a room client interface by name.
      *
-     * @param {string} name - The name of the room.
+     * @param {string} name - Room channel name.
      * @throws {TypeError} If name is not a string.
-     * @returns {Room} The room instance.
+     * @returns {Room} Room interface instance.
      */
     function get_room(name) {
         if (typeof name !== "string") {
@@ -209,6 +332,7 @@ function roomer(url) {
             return rooms[name];
         }
 
+        /** @type {string[]} */
         const members = [];
         const registered_events = Object.create(null);
         let is_open = false;
@@ -216,9 +340,9 @@ function roomer(url) {
         let self;
 
         /**
-         * Clears all registered event listeners except those in exceptions.
+         * Clears registered listeners except those explicitly listed.
          *
-         * @param {string[]} [exceptions] - Event types to preserve.
+         * @param {string[]} [exceptions] - Event names to preserve.
          * @returns {Room} The room instance.
          */
         function clearListeners(exceptions) {
@@ -236,7 +360,7 @@ function roomer(url) {
         }
 
         /**
-         * Forces the room to close and cleans up state.
+         * Closes the room locally and clears all tracked state.
          *
          * @returns {Room} The room instance.
          */
@@ -252,21 +376,21 @@ function roomer(url) {
         }
 
         /**
-         * Returns the client ID assigned to this member in the room.
+         * Returns the member client ID assigned to this connection.
          *
-         * @returns {string} The member ID.
+         * @returns {string} Assigned client ID string.
          */
         function getId() {
             return member_id;
         }
 
         /**
-         * Joins a new room on the existing WebSocket connection.
+         * Joins a new room channel on the current connection.
          *
          * @param {string} room_name - Room name to join.
-         * @throws {Error} If current room is closed.
+         * @throws {Error} If the current room is closed.
          * @throws {TypeError} If room_name is not a string.
-         * @returns {Room} The joined room instance.
+         * @returns {Room} Joined room instance.
          */
         function join(room_name) {
             if (is_open === false) {
@@ -275,16 +399,13 @@ function roomer(url) {
             if (typeof room_name !== "string") {
                 throw new TypeError("Room name must be a string.");
             }
-            if (rooms[room_name] !== undefined) {
-                return rooms[room_name];
-            }
             return get_room(room_name);
         }
 
         /**
-         * Leaves the current room and sends leave notification to server.
+         * Leaves the current room and notifies the server.
          *
-         * @throws {Error} If current room is closed.
+         * @throws {Error} If the room is closed.
          * @returns {Room} The room instance.
          */
         function leave() {
@@ -309,27 +430,27 @@ function roomer(url) {
         }
 
         /**
-         * Returns a copy of the list of current member IDs in the room.
+         * Returns a shallow copy array of all active member IDs.
          *
-         * @returns {string[]} Array of member ID strings.
+         * @returns {string[]} Member ID array.
          */
         function getMembers() {
             return members.slice();
         }
 
         /**
-         * Checks if the room connection is open.
+         * Returns whether the room connection is open and active.
          *
-         * @returns {boolean} True if open, false otherwise.
+         * @returns {boolean} True if active, false otherwise.
          */
         function getIsOpen() {
             return is_open;
         }
 
         /**
-         * Dispatches an incoming packet to the room's event listeners.
+         * Dispatches an incoming parsed packet to room listeners.
          *
-         * @param {Packet} packet - Parsed binary packet data.
+         * @param {Packet} packet - Incoming packet frame.
          * @returns {void}
          */
         function parse(packet) {
@@ -342,9 +463,7 @@ function roomer(url) {
                 member_id = packet.src;
                 members.length = 0;
                 try {
-                    parsed = JSON.parse(
-                        decoder.decode(packet.payload)
-                    );
+                    parsed = JSON.parse(decoder.decode(packet.payload));
                     if (Array.isArray(parsed) === true) {
                         members.push(...parsed);
                     }
@@ -386,12 +505,12 @@ function roomer(url) {
         }
 
         /**
-         * Sends an event message to the room or a specific member.
+         * Sends an event message to the room or a recipient ID.
          *
-         * @param {string} event - Event name to emit.
+         * @param {string} event - Event name to transmit.
          * @param {*} [payload] - Optional payload data.
          * @param {string} [dst] - Optional destination member ID.
-         * @throws {Error} If room is closed, event is invalid, or reserved.
+         * @throws {Error} If room is closed or event is reserved.
          * @returns {Room} The room instance.
          */
         function send(event, payload, dst) {
@@ -408,9 +527,7 @@ function roomer(url) {
                 socket !== undefined &&
                 socket.readyState === WebSocket.OPEN
             ) {
-                socket.send(
-                    new_message(name, event, dst, member_id, payload)
-                );
+                socket.send(new_message(name, event, dst, member_id, payload));
             }
             return self;
         }
@@ -429,6 +546,11 @@ function roomer(url) {
         };
 
         if (name === "root") {
+            /**
+             * Leaves all active non-root rooms simultaneously.
+             *
+             * @returns {Room} The root room instance.
+             */
             room_methods.purge = function () {
                 Object.keys(rooms).forEach(function (r_name) {
                     if (r_name !== "root") {
@@ -438,6 +560,11 @@ function roomer(url) {
                 return self;
             };
 
+            /**
+             * Returns a frozen copy of all active room instances.
+             *
+             * @returns {Readonly<Object.<string, Room>>} Active rooms map.
+             */
             room_methods.rooms = function () {
                 const room_copy = Object.create(null);
                 Object.keys(rooms).forEach(function (r_key) {
@@ -447,11 +574,10 @@ function roomer(url) {
             };
         }
 
-        // 1. Create frozen room object directly via emitter mixin
+        // Mix in EventEmitter methods and freeze the instance
         self = emitter(room_methods);
 
-        // 2. Attach newListener handler to automatically track
-        //    registered event names
+        // Track custom registered event names for clearListeners()
         self.on("newListener", function (event_type) {
             if (event_type !== "newListener") {
                 registered_events[event_type] = true;
@@ -473,50 +599,7 @@ function roomer(url) {
         return self;
     }
 
-    if (WebSocket !== undefined) {
-        socket = new WebSocket(url);
-        socket.binaryType = "arraybuffer";
-
-        socket.onmessage = function (e) {
-            try {
-                const data = bytecursor(e.data);
-                const room_str = data.getString(data.getUint32());
-                const event_str = data.getString(data.getUint32());
-                const dst_str = data.getString(data.getUint32());
-                const src_str = data.getString(data.getUint32());
-                const payload_bytes = data.getBytes(data.getUint32());
-
-                const packet = {
-                    dst: dst_str,
-                    event: event_str,
-                    payload: payload_bytes,
-                    room: room_str,
-                    src: src_str
-                };
-
-                if (rooms[packet.room] === undefined) {
-                    return;
-                }
-                rooms[packet.room].parse(packet);
-            } catch (err) {
-                console.error(
-                    "Failed to parse incoming WebSocket message: ",
-                    err
-                );
-            }
-        };
-
-        socket.onclose = function () {
-            Object.keys(rooms).forEach(function (r_name) {
-                rooms[r_name].forceClose();
-            });
-        };
-
-        socket.onerror = function (err) {
-            console.error("WebSocket error: " + err);
-        };
-    }
-
+    connect();
     return get_room("root");
 }
 

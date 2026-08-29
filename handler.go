@@ -6,9 +6,22 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
+
+// ReservedEvents contains internal protocol event names that cannot be registered as custom handlers.
+var ReservedEvents = []string{
+	"join",
+	"leave",
+	"join_ack",
+	"leave_ack",
+	"new_member",
+	"member_left",
+	"open",
+	"close",
+}
 
 // Authorize is a function that extracts authenticated claims from an HTTP request.
 type Authorize func(*http.Request) (map[string]string, error)
@@ -18,11 +31,13 @@ type MessageHandler func(c *Conn, msg *Message) error
 
 // Config holds configuration options for WebSocket connections and upgrader.
 type Config struct {
+	Hub             *Hub
 	Authorize       Authorize
 	MaxMessageSize  int64
 	WriteWait       time.Duration
 	PongWait        time.Duration
 	PingPeriod      time.Duration
+	ChannelCapacity int
 	ReadBufferSize  int
 	WriteBufferSize int
 	CheckOrigin     func(r *http.Request) bool
@@ -34,19 +49,30 @@ type Config struct {
 // Option sets a configuration option for roomer WebSocket handling.
 type Option func(*Config)
 
-// DefaultConfig returns a Config with sensible default settings.
+// DefaultConfig returns a Config with production-grade default settings.
 func DefaultConfig() Config {
 	return Config{
+		Hub:             defaultHub,
 		MaxMessageSize:  16 * 1024 * 1024,
 		WriteWait:       10 * time.Second,
 		PongWait:        60 * time.Second,
 		PingPeriod:      54 * time.Second,
+		ChannelCapacity: 256,
 		ReadBufferSize:  4096,
 		WriteBufferSize: 4096,
-        CheckOrigin:     nil, // Let gorilla/websocket enforce same-origin by default
+		CheckOrigin:     nil, // gorilla/websocket enforces same-origin by default
 		Logger:          slog.Default(),
 		Metrics:         NopMetrics{},
 		Adapter:         newLocalAdapter(),
+	}
+}
+
+// WithHub sets a specific custom Hub coordinator instance.
+func WithHub(h *Hub) Option {
+	return func(c *Config) {
+		if h != nil {
+			c.Hub = h
+		}
 	}
 }
 
@@ -90,6 +116,15 @@ func WithPingPeriod(d time.Duration) Option {
 	return func(c *Config) {
 		if d > 0 {
 			c.PingPeriod = d
+		}
+	}
+}
+
+// WithChannelCapacity sets the buffered outbound channel capacity for each connection.
+func WithChannelCapacity(capacity int) Option {
+	return func(c *Config) {
+		if capacity > 0 {
+			c.ChannelCapacity = capacity
 		}
 	}
 }
@@ -148,6 +183,7 @@ var (
 )
 
 // RegisterHandler registers a custom event handler for a given event name.
+// Rejects reserved event names and duplicate registrations.
 func RegisterHandler(event string, handler MessageHandler) error {
 	if event == "" {
 		return fmt.Errorf("event name cannot be empty")
@@ -155,6 +191,13 @@ func RegisterHandler(event string, handler MessageHandler) error {
 	if handler == nil {
 		return fmt.Errorf("handler cannot be nil")
 	}
+
+	for _, reserved := range ReservedEvents {
+		if event == reserved {
+			return fmt.Errorf("cannot register handler for reserved event %q", event)
+		}
+	}
+
 	messageHandlersMu.Lock()
 	defer messageHandlersMu.Unlock()
 	if _, exists := messageHandlers[event]; exists {
@@ -171,12 +214,24 @@ func getHandler(event string) MessageHandler {
 	return messageHandlers[event]
 }
 
-// Shutdown gracefully terminates all connections and releases hub/adapter resources within deadline context.
-func Shutdown(ctx context.Context) error {
-	return hub.Shutdown(ctx)
+// ExtractBearerToken extracts standard Bearer token credentials from the HTTP Authorization header.
+func ExtractBearerToken(r *http.Request) (string, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", fmt.Errorf("missing Authorization header")
+	}
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return "", fmt.Errorf("invalid Authorization header format")
+	}
+	return strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer ")), nil
 }
 
-// SocketHandler returns an HTTP handler that upgrades to WebSocket and manages the connection lifecycle.
+// Shutdown gracefully terminates all connections on DefaultHub and releases adapter resources.
+func Shutdown(ctx context.Context) error {
+	return defaultHub.Shutdown(ctx)
+}
+
+// SocketHandler returns an HTTP handler that upgrades to WebSocket with basic authorization.
 func SocketHandler(authFn Authorize) http.HandlerFunc {
 	return SocketHandlerWithOptions(WithAuthorize(authFn))
 }
@@ -190,30 +245,40 @@ func SocketHandlerWithOptions(opts ...Option) http.HandlerFunc {
 		}
 	}
 
-	hub.configure(cfg.Adapter, cfg.Metrics, cfg.Logger)
+	hub := cfg.Hub
+	if hub == nil {
+		hub = defaultHub
+	}
+	hub.Configure(cfg.Adapter, cfg.Metrics, cfg.Logger)
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
+		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
 		var claims map[string]string
 		if cfg.Authorize != nil {
 			var err error
 			claims, err = cfg.Authorize(r)
 			if err != nil {
+				if cfg.Logger != nil {
+					cfg.Logger.Warn("Unauthorized WebSocket upgrade handshake", "err", err)
+				}
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 		}
-		c := newConnection(w, r, claims, cfg)
+
+		c := newConnection(w, r, claims, cfg, hub)
 		if c == nil {
 			return
 		}
+
 		hub.addConn(c)
 		hub.joinRoom("root", c)
 
-		// Send join_ack for "root" room
+		// Send join_ack for default "root" room
 		members := []byte("[]")
 		if room, ok := hub.getRoom("root"); ok {
 			if snap, err := json.Marshal(room.snapshot()); err == nil {

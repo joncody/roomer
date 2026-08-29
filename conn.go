@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,10 +15,12 @@ import (
 type Conn struct {
 	ID          string
 	Claims      map[string]string // Authenticated claims (e.g., user ID, roles)
-	send        chan []byte       // Outbound message queue
+	hub         *Hub
+	send        chan []byte // Outbound message queue
 	socket      *websocket.Conn
-	cleanupOnce sync.Once // Ensures cleanup happens only once
+	cleanupOnce sync.Once
 	done        chan struct{}
+	cleaningUp  int32
 	roomsMu     sync.RWMutex
 	rooms       map[string]struct{} // Set of joined room names
 	config      Config
@@ -56,13 +59,22 @@ func (c *Conn) joinedRooms() []string {
 	return rooms
 }
 
-// TrySend attempts to send a message; drops it if the send buffer is full or closed.
+// IsInRoom checks if this connection is currently tracked in a room.
+func (c *Conn) IsInRoom(room string) bool {
+	c.roomsMu.RLock()
+	defer c.roomsMu.RUnlock()
+	_, ok := c.rooms[room]
+	return ok
+}
+
+// TrySend attempts to send a binary message; drops it and triggers asynchronous cleanup if send buffer is full.
 func (c *Conn) TrySend(msg []byte) bool {
 	select {
 	case <-c.done:
 		return false
 	default:
 	}
+
 	select {
 	case <-c.done:
 		return false
@@ -78,80 +90,95 @@ func (c *Conn) TrySend(msg []byte) bool {
 		if c.config.Logger != nil {
 			c.config.Logger.Warn("Conn dropped message (buffer full or slow client)", "conn_id", c.ID)
 		}
-		go c.cleanup()
+
+		// Trigger teardown once asynchronously without spawning duplicate goroutines
+		if atomic.CompareAndSwapInt32(&c.cleaningUp, 0, 1) {
+			go c.cleanup()
+		}
 		return false
 	}
 }
 
-// SendToRoom broadcasts a message to all members of the specified room.
+// SendToRoom broadcasts a message to all members of the specified room except self.
 func (c *Conn) SendToRoom(roomName, event string, payload []byte) {
 	msg := NewMessage(roomName, event, "", c.ID, payload)
-	if room, ok := hub.getRoom(roomName); ok {
+	if room, ok := c.hub.getRoom(roomName); ok {
 		room.emit(c, msg)
 	}
 }
 
-// SendToClient sends a direct message to another client by ID.
+// SendToClient sends a direct message to another client by connection ID.
 func (c *Conn) SendToClient(dstID, event string, payload []byte) {
 	msg := NewMessage("root", event, dstID, c.ID, payload)
-	if dst, ok := hub.getConn(dstID); ok {
+	if dst, ok := c.hub.getConn(dstID); ok {
 		dst.TrySend(msg.Bytes())
 	}
 }
 
-// dispatch routes an incoming message to appropriate handlers or rooms.
+// dispatch routes an incoming message to handlers or rooms.
 func (c *Conn) dispatch(msg *Message) {
 	select {
 	case <-c.done:
 		return
 	default:
 	}
+
 	msg.Src = c.ID
 	msg.SrcLength = len(c.ID)
+
 	switch msg.Event {
 	case "join":
-		hub.joinRoom(msg.Room, c)
-		members := []byte("[]") // or fetch real snapshot if needed
-		if room, ok := hub.getRoom(msg.Room); ok {
+		c.hub.joinRoom(msg.Room, c)
+		members := []byte("[]")
+		if room, ok := c.hub.getRoom(msg.Room); ok {
 			if snap, err := json.Marshal(room.snapshot()); err == nil {
 				members = snap
 			}
 		}
 		ack := NewMessage(msg.Room, "join_ack", "", c.ID, members).Bytes()
 		c.TrySend(ack)
+
 	case "leave":
-		hub.leaveRoom(msg.Room, c)
+		c.hub.leaveRoom(msg.Room, c)
 		ack := NewMessage(msg.Room, "leave_ack", "", c.ID, []byte(c.ID)).Bytes()
 		c.TrySend(ack)
+
 	default:
+		// Direct targeted messaging
 		if msg.Dst != "" {
-			if dst, ok := hub.getConn(msg.Dst); ok {
+			if dst, ok := c.hub.getConn(msg.Dst); ok {
 				dst.TrySend(msg.Bytes())
 			}
 			return
 		}
+
+		// Custom handler dispatch
 		if handler := getHandler(msg.Event); handler != nil {
-			if err := handler(c, msg); err != nil {
-				if c.config.Logger != nil {
-					c.config.Logger.Error("Message handler error", "event", msg.Event, "conn_id", c.ID, "err", err)
+			go func() {
+				if err := handler(c, msg); err != nil {
+					if c.config.Logger != nil {
+						c.config.Logger.Error("Message handler execution error", "event", msg.Event, "conn_id", c.ID, "err", err)
+					}
 				}
-			}
+			}()
 			return
 		}
-		if room, ok := hub.getRoom(msg.Room); ok {
+
+		// Default room broadcast
+		if room, ok := c.hub.getRoom(msg.Room); ok {
 			room.emit(c, msg)
 		}
 	}
 }
 
-// cleanup safely removes the connection from all rooms and closes resources.
+// cleanup safely removes the connection from all rooms and releases resources.
 func (c *Conn) cleanup() {
 	c.cleanupOnce.Do(func() {
 		close(c.done)
-		hub.leaveAllRooms(c)
-		hub.removeConn(c.ID)
+		c.hub.leaveAllRooms(c)
+		c.hub.removeConn(c.ID)
 		if c.socket != nil {
-			c.socket.Close()
+			_ = c.socket.Close()
 		}
 	})
 }
@@ -162,12 +189,14 @@ func (c *Conn) readPump() {
 		return
 	}
 	defer c.cleanup()
+
 	c.socket.SetReadLimit(c.config.MaxMessageSize)
-	c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
+	_ = c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
 	c.socket.SetPongHandler(func(string) error {
-		c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
+		_ = c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
 		return nil
 	})
+
 	for {
 		_, data, err := c.socket.ReadMessage()
 		if err != nil {
@@ -192,7 +221,7 @@ func (c *Conn) write(mt int, payload []byte) error {
 	if c.socket == nil {
 		return nil
 	}
-	c.socket.SetWriteDeadline(time.Now().Add(c.config.WriteWait))
+	_ = c.socket.SetWriteDeadline(time.Now().Add(c.config.WriteWait))
 	return c.socket.WriteMessage(mt, payload)
 }
 
@@ -203,17 +232,22 @@ func (c *Conn) writePump() {
 		ticker.Stop()
 		c.cleanup()
 	}()
+
 	for {
 		select {
-		case msg := <-c.send:
+		case msg, ok := <-c.send:
+			if !ok {
+				_ = c.write(websocket.CloseMessage, []byte{})
+				return
+			}
 			if err := c.write(websocket.BinaryMessage, msg); err != nil {
 				return
 			}
 		case <-c.done:
-			c.write(websocket.CloseMessage, []byte{})
+			_ = c.write(websocket.CloseMessage, []byte{})
 			return
 		case <-ticker.C:
-			if err := c.write(websocket.PingMessage, []byte{}); err != nil {
+			if err := c.write(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
@@ -221,7 +255,7 @@ func (c *Conn) writePump() {
 }
 
 // newConnection upgrades an HTTP request to a WebSocket and initializes a Conn.
-func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]string, cfg Config) *Conn {
+func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]string, cfg Config, h *Hub) *Conn {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  cfg.ReadBufferSize,
 		WriteBufferSize: cfg.WriteBufferSize,
@@ -233,14 +267,15 @@ func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]str
 	}
 	id, err := uuid.NewRandom()
 	if err != nil {
-		sock.Close()
+		_ = sock.Close()
 		return nil
 	}
 	return &Conn{
 		ID:     id.String(),
 		Claims: claims,
+		hub:    h,
 		socket: sock,
-		send:   make(chan []byte, 256),
+		send:   make(chan []byte, cfg.ChannelCapacity),
 		done:   make(chan struct{}),
 		rooms:  make(map[string]struct{}),
 		config: cfg,

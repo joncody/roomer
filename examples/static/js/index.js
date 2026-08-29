@@ -1,7 +1,12 @@
 import roomer from "/src/roomer.js";
 
 const decoder = new TextDecoder("utf-8");
-const root = roomer("ws://localhost:8080/ws");
+
+// Automatically use the host/port and protocol of the current page
+const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+const ws_url = protocol + "//" + location.host + "/ws";
+
+const root = roomer(ws_url, { reconnect: true });
 
 root.on("open", function () {
     console.log("Joined root room. Client ID: " + root.id());
@@ -10,7 +15,7 @@ root.on("open", function () {
 
     lobby.on("open", function () {
         console.log("Joined lobby channel!");
-        lobby.send("chat", "Hello room!");
+        lobby.send("chat", "Hello from " + location.host + "!");
     });
 
     lobby.on("chat", function (payload, sender_id) {

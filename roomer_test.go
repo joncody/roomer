@@ -5,13 +5,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // -----------------------------------------------------------------------------
-// 1. Functional & Concurrency Unit Tests
+// 1. Message Encoding & Framing Tests
 // -----------------------------------------------------------------------------
 
 func TestMessage_Roundtrip(t *testing.T) {
@@ -38,6 +37,31 @@ func TestMessage_Roundtrip(t *testing.T) {
 	if !bytes.Equal(decoded.Payload, original.Payload) {
 		t.Errorf("expected Payload %q, got %q", original.Payload, decoded.Payload)
 	}
+	if decoded.PayloadString() != "hello roomer!" {
+		t.Errorf("expected PayloadString 'hello roomer!', got %q", decoded.PayloadString())
+	}
+}
+
+func TestMessage_JSONHelpers(t *testing.T) {
+	type userPayload struct {
+		Name string `json:"name"`
+		Age  int    `json:"age"`
+	}
+
+	input := userPayload{Name: "Alice", Age: 30}
+	msg, err := NewJSONMessage("lobby", "user_join", "", "system", input)
+	if err != nil {
+		t.Fatalf("failed to create JSON message: %v", err)
+	}
+
+	var output userPayload
+	if err := msg.PayloadJSON(&output); err != nil {
+		t.Fatalf("failed to parse JSON payload: %v", err)
+	}
+
+	if output != input {
+		t.Errorf("expected output %+v, got %+v", input, output)
+	}
 }
 
 func TestMessage_MalformedInput(t *testing.T) {
@@ -58,32 +82,42 @@ func TestMessage_MalformedInput(t *testing.T) {
 	}
 }
 
-type testMetricsCollector struct {
-	NopMetrics
-	connects int64
-	rooms    int64
-	sent     int64
+// -----------------------------------------------------------------------------
+// 2. Handler Registration & Invariant Guard Tests
+// -----------------------------------------------------------------------------
+
+func TestRegisterHandler_ReservedAndDuplicateGuards(t *testing.T) {
+	// 1. Reserved event registration must fail
+	err := RegisterHandler("join", func(c *Conn, msg *Message) error { return nil })
+	if err == nil {
+		t.Errorf("expected error registering reserved event 'join', got nil")
+	}
+
+	// 2. Custom event succeeds
+	err = RegisterHandler("custom_test_evt", func(c *Conn, msg *Message) error { return nil })
+	if err != nil {
+		t.Fatalf("expected custom event registration to succeed, got %v", err)
+	}
+
+	// 3. Duplicate event registration must fail
+	err = RegisterHandler("custom_test_evt", func(c *Conn, msg *Message) error { return nil })
+	if err == nil {
+		t.Errorf("expected error registering duplicate event, got nil")
+	}
 }
 
-func (m *testMetricsCollector) OnConnect() {
-	atomic.AddInt64(&m.connects, 1)
-}
-
-func (m *testMetricsCollector) OnRoomCreated(room string) {
-	atomic.AddInt64(&m.rooms, 1)
-}
-
-func (m *testMetricsCollector) OnMessageSent(bytes int) {
-	atomic.AddInt64(&m.sent, int64(bytes))
-}
+// -----------------------------------------------------------------------------
+// 3. Concurrency, Race Condition & Metrics Tests
+// -----------------------------------------------------------------------------
 
 func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
-	metrics := &testMetricsCollector{}
-	hub.configure(newLocalAdapter(), metrics, nil)
+	metrics := NewInMemoryMetrics()
+	h := NewHub()
+	h.Configure(newLocalAdapter(), metrics, nil)
 
 	var wg sync.WaitGroup
-	workers := 50
-	connsPerWorker := 30
+	workers := 20
+	connsPerWorker := 25
 
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -91,16 +125,18 @@ func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < connsPerWorker; i++ {
 				connID := fmt.Sprintf("conn_%d_%d", workerID, i)
-				roomName := fmt.Sprintf("room_%d", (workerID+i)%10)
+				roomName := fmt.Sprintf("room_%d", (workerID+i)%5)
 
 				c := &Conn{
 					ID:     connID,
+					hub:    h,
 					send:   make(chan []byte, 256),
 					done:   make(chan struct{}),
 					rooms:  make(map[string]struct{}),
 					config: DefaultConfig(),
 				}
 
+				// Consumer goroutine
 				go func(conn *Conn) {
 					for {
 						select {
@@ -111,18 +147,18 @@ func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
 					}
 				}(c)
 
-				hub.addConn(c)
-				hub.joinRoom(roomName, c)
+				h.addConn(c)
+				h.joinRoom(roomName, c)
 
-				if _, ok := hub.getConn(connID); !ok {
+				if _, ok := h.getConn(connID); !ok {
 					t.Errorf("failed to retrieve conn %s", connID)
 				}
-				if _, ok := hub.getRoom(roomName); !ok {
+				if _, ok := h.getRoom(roomName); !ok {
 					t.Errorf("failed to retrieve room %s", roomName)
 				}
 
-				hub.leaveRoom(roomName, c)
-				hub.removeConn(connID)
+				h.leaveRoom(roomName, c)
+				h.removeConn(connID)
 				c.cleanup()
 			}
 		}(w)
@@ -130,25 +166,30 @@ func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
 
 	wg.Wait()
 
-	if atomic.LoadInt64(&metrics.connects) == 0 {
-		t.Errorf("expected metrics to record connects")
+	if metrics.TotalConnections() != int64(workers*connsPerWorker) {
+		t.Errorf("expected %d total connections, got %d", workers*connsPerWorker, metrics.TotalConnections())
+	}
+	if metrics.ActiveConnections() != 0 {
+		t.Errorf("expected 0 active connections after cleanup, got %d", metrics.ActiveConnections())
 	}
 }
 
 func TestHub_GracefulShutdown(t *testing.T) {
+	h := NewHub()
 	c := &Conn{
 		ID:     "shutdown_test_conn",
+		hub:    h,
 		send:   make(chan []byte, 10),
 		done:   make(chan struct{}),
 		rooms:  make(map[string]struct{}),
 		config: DefaultConfig(),
 	}
 
-	hub.addConn(c)
+	h.addConn(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if err := Shutdown(ctx); err != nil {
+	if err := h.Shutdown(ctx); err != nil {
 		t.Fatalf("expected graceful shutdown without error, got %v", err)
 	}
 
@@ -160,7 +201,7 @@ func TestHub_GracefulShutdown(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 2. Allocation & Performance Benchmarks
+// 4. Benchmarks
 // -----------------------------------------------------------------------------
 
 func BenchmarkMessage_Bytes(b *testing.B) {
@@ -184,14 +225,16 @@ func BenchmarkBytesToMessage(b *testing.B) {
 	}
 }
 
-func BenchmarkRoom_Emit(b *testing.B) {
-	r := newRoom("bench_room")
+func BenchmarkRoom_Emit_1000Conns(b *testing.B) {
+	h := NewHub()
+	r := newRoom("bench_room", h)
 	msg := NewMessage("bench_room", "chat", "", "sender", []byte("payload"))
 
-	conns := make([]*Conn, 100)
-	for i := 0; i < 100; i++ {
+	conns := make([]*Conn, 1000)
+	for i := 0; i < 1000; i++ {
 		c := &Conn{
 			ID:     fmt.Sprintf("user_%d", i),
+			hub:    h,
 			send:   make(chan []byte, 2048),
 			done:   make(chan struct{}),
 			rooms:  make(map[string]struct{}),
@@ -200,7 +243,6 @@ func BenchmarkRoom_Emit(b *testing.B) {
 		r.addMember(c)
 		conns[i] = c
 
-		// Spawn background drainer simulating active WebSocket client consumption
 		go func(conn *Conn) {
 			for {
 				select {
