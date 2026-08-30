@@ -1,10 +1,9 @@
 [advisories]
-vulnerability = "deny"
 unmaintained = "workspace"
 yanked = "warn"
 
 [licenses]
-unlicensed = "deny"
+confidence-threshold = 0.8
 allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC"]
 
 [bans]

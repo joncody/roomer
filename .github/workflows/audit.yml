@@ -22,4 +22,4 @@ jobs:
         with:
           command: check
           manifest-path: server/rust/Cargo.toml
-          config: server/rust/deny.toml
+          command-arguments: --config server/rust/deny.toml
