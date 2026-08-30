@@ -245,6 +245,10 @@ cd client/python && pytest -v
 The state-safety invariants (`NoUnconnectedMembers`, `NotConnectedBufferEmpty`, and `TypeOK`) are formally specified in `spec/roomer.tla`:
 
 ```bash
+# Using the tlc command line utility:
+tlc -config spec/roomer.cfg spec/roomer.tla
+
+# OR using tla2tools.jar directly:
 java -cp tla2tools.jar tlc2.TLC -config spec/roomer.cfg spec/roomer.tla
 ```
 
