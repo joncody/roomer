@@ -1,4 +1,4 @@
-name: CI
+name: Rust CI
 
 on:
   push:
@@ -10,9 +10,13 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+defaults:
+  run:
+    working-directory: server/rust
+
 jobs:
   test:
-    name: Test (${{ matrix.os }})
+    name: Rust Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -36,9 +40,13 @@ jobs:
         run: cargo test --all-targets --all-features
 
   docs:
-    name: Documentation
+    name: Rust Documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo doc --no-deps --all-features
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Docs
+        run: cargo doc --no-deps --all-features
