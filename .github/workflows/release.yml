@@ -1,0 +1,48 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish-crates:
+    name: Publish to Crates.io (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        run: cargo publish --manifest-path server/rust/Cargo.toml --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-npm:
+    name: Publish to npm (Node.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish to npm
+        run: |
+          cd server/node
+          npm ci || npm install
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-pypi:
+    name: Publish to PyPI (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build & Publish to PyPI
+        run: |
+          cd client/python
+          pip install --upgrade build twine
+          python -m build
+          twine upload dist/* -u __token__ -p ${{ secrets.PYPI_API_TOKEN }}

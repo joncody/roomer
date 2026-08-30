@@ -3,8 +3,18 @@
     "version": "0.1.0",
     "description": "High-performance, room-based WebSocket server with binary framing and multi-node clustering for Node.js",
     "main": "index.js",
-    "types": "index.d.ts",
     "type": "module",
+    "files": [
+        "*.js",
+        "*.d.ts",
+        "README.md",
+        "LICENSE"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/joncody/roomer.git",
+        "directory": "server/node"
+    },
     "scripts": {
         "start": "node examples/main.js",
         "test": "node --test tests/index.js"

@@ -1,62 +1,126 @@
-# Rust build artifacts
-target/
-**/target/
-**/*.rs.bk
-*.rlib
-
-# Go build artifacts & binaries
-server_bin
-/app/server_bin
-bin/
-**/bin/
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-*.test
-*.out
-*.prof
-
-# Node / Web / Package managers (if any tooling is added)
-node_modules/
-dist/
-.npm
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# IDEs and Text Editors
-.vscode/
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-.idea/
-*.iml
-*.sublime-workspace
-*.sublime-project
-*.swp
-*.swo
-*~
-
-# Operating System Files
+# ==============================================================================
+# Operating System & IDE Files
+# ==============================================================================
+# macOS
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-ehthumbs.db
-Thumbs.db
 
-# Environment variables & local overrides
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+
+# Linux
+*~
+
+# IDEs & Editors
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*.swn
+
+# ==============================================================================
+# Rust (server/rust)
+# ==============================================================================
+# Build artifacts
+target/
+server/rust/target/
+
+# Backup & profile files
+**/*.rs.bk
+*.profraw
+*.profdata
+
+# ==============================================================================
+# Go (server/go)
+# ==============================================================================
+# Compiled test and coverage binaries
+*.test
+*.out
+*.prof
+server/go/cover.out
+
+# Local execution binaries
+/server/go/cmd/loadtest/loadtest
+/server/go/examples/example
+
+# ==============================================================================
+# Node.js & JavaScript (server/node, client)
+# ==============================================================================
+# Dependencies
+node_modules/
+server/node/node_modules/
+
+# Build and distribution outputs
+dist/
+server/node/dist/
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# TypeScript cache
+*.tsbuildinfo
+
+# ==============================================================================
+# Python (client/python)
+# ==============================================================================
+# Bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+client/python/.venv/
+client/python/venv/
+
+# Packaging & distribution
+*.egg-info/
+*.egg
+client/python/*.egg-info/
+client/python/dist/
+client/python/build/
+
+# Testing & coverage
+.pytest_cache/
+client/python/.pytest_cache/
+.coverage
+htmlcov/
+
+# ==============================================================================
+# Formal Verification (spec/ - TLA+)
+# ==============================================================================
+spec/*.tlacache
+spec/states/
+*.tlacache
+states/
+
+# ==============================================================================
+# Environment Variables & Local Configs
+# ==============================================================================
 .env
 .env.local
 .env.*.local
-docker-compose.override.yml
-
-# TLA+ Model Checker (TLC) generated artifacts
-spec/states/
-MC.*
-*.tla.dump
+*.local
