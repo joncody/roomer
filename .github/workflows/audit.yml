@@ -10,10 +10,6 @@ jobs:
   audit-deny:
     name: Cargo Audit & Deny
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server/rust
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,4 +21,5 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          arguments: --manifest-path server/rust/Cargo.toml --config server/rust/deny.toml
+          manifest-path: server/rust/Cargo.toml
+          config: server/rust/deny.toml
