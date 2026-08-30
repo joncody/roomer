@@ -359,8 +359,13 @@ pub mod redis {
         async fn add_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError> {
             let mut conn = self.get_publish_conn().await?;
             let key = format!("{}presence:{}", self.prefix, room);
-            let _res: i64 = ::redis::cmd("SADD")
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _res: i64 = ::redis::cmd("ZADD")
                 .arg(&key)
+                .arg(now)
                 .arg(conn_id)
                 .query_async(&mut conn)
                 .await
@@ -371,7 +376,7 @@ pub mod redis {
         async fn remove_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError> {
             let mut conn = self.get_publish_conn().await?;
             let key = format!("{}presence:{}", self.prefix, room);
-            let _res: i64 = ::redis::cmd("SREM")
+            let _res: i64 = ::redis::cmd("ZREM")
                 .arg(&key)
                 .arg(conn_id)
                 .query_async(&mut conn)
@@ -383,8 +388,23 @@ pub mod redis {
         async fn get_presence(&self, room: &str) -> Result<Vec<String>, AdapterError> {
             let mut conn = self.get_publish_conn().await?;
             let key = format!("{}presence:{}", self.prefix, room);
-            let members: Vec<String> = ::redis::cmd("SMEMBERS")
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let min_score = now.saturating_sub(86400);
+
+            let _prune: Result<i64, _> = ::redis::cmd("ZREMRANGEBYSCORE")
                 .arg(&key)
+                .arg("-inf")
+                .arg(min_score)
+                .query_async(&mut conn)
+                .await;
+
+            let members: Vec<String> = ::redis::cmd("ZRANGEBYSCORE")
+                .arg(&key)
+                .arg(min_score)
+                .arg("+inf")
                 .query_async(&mut conn)
                 .await
                 .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;

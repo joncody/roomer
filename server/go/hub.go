@@ -6,8 +6,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 const shardCount = 32
@@ -215,11 +213,9 @@ func (h *Hub) joinRoom(name string, c *Conn) {
 		adapter := h.adapter
 		h.cfgMu.RUnlock()
 		if adapter != nil {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				_ = adapter.AddPresence(ctx, name, c.ID)
-			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = adapter.AddPresence(ctx, name, c.ID)
+			cancel()
 		}
 
 		r.emit(c, NewMessage(r.Name, "new_member", "", "", []byte(c.ID)))
@@ -266,6 +262,14 @@ func (h *Hub) leaveAllRooms(c *Conn) {
 
 // getClusterPresence retrieves all member IDs in a room across the entire cluster.
 func (h *Hub) getClusterPresence(roomName string) []string {
+	memberMap := make(map[string]struct{})
+
+	if r, ok := h.getRoom(roomName); ok {
+		for _, id := range r.snapshot() {
+			memberMap[id] = struct{}{}
+		}
+	}
+
 	h.cfgMu.RLock()
 	adapter := h.adapter
 	h.cfgMu.RUnlock()
@@ -273,15 +277,18 @@ func (h *Hub) getClusterPresence(roomName string) []string {
 	if adapter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if members, err := adapter.GetPresence(ctx, roomName); err == nil && len(members) > 0 {
-			return members
+		if members, err := adapter.GetPresence(ctx, roomName); err == nil {
+			for _, id := range members {
+				memberMap[id] = struct{}{}
+			}
 		}
 	}
 
-	if r, ok := h.getRoom(roomName); ok {
-		return r.snapshot()
+	res := make([]string, 0, len(memberMap))
+	for id := range memberMap {
+		res = append(res, id)
 	}
-	return []string{}
+	return res
 }
 
 // sendDirectToCluster routes a direct message using targeted node unicast when target node is known.
@@ -333,7 +340,7 @@ func (h *Hub) publishToCluster(roomName string, msg *Message) {
 	}
 }
 
-// Shutdown gracefully drains active connections, sends WebSocket Close frames (1001), and terminates adapters.
+// Shutdown gracefully drains active connections and terminates adapters.
 func (h *Hub) Shutdown(ctx context.Context) error {
 	var conns []*Conn
 	for i := 0; i < shardCount; i++ {
@@ -345,34 +352,15 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 		shard.mu.RUnlock()
 	}
 
-	var wg sync.WaitGroup
-	closeData := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
-
 	for _, c := range conns {
-		wg.Add(1)
-		go func(conn *Conn) {
-			defer wg.Done()
-			_ = conn.write(websocket.CloseMessage, closeData)
-			conn.cleanup()
-		}(c)
+		c.cleanup()
 	}
 
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		h.cfgMu.RLock()
-		adapter := h.adapter
-		h.cfgMu.RUnlock()
-		if adapter != nil {
-			return adapter.Close()
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	h.cfgMu.RLock()
+	adapter := h.adapter
+	h.cfgMu.RUnlock()
+	if adapter != nil {
+		return adapter.Close()
 	}
+	return nil
 }

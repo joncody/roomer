@@ -113,7 +113,7 @@ function create_conn(id, ws, hub, claims, capacity, backpressure) {
         if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > max_buffer_bytes) {
             hub.metrics.onMessageDropped();
 
-            if (strategy === BACKPRESSURE.DROP_NEWEST) {
+            if (strategy === BACKPRESSURE.DROP_NEWEST || strategy === BACKPRESSURE.DROP_OLDEST) {
                 return false;
             }
 

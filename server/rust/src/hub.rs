@@ -6,6 +6,7 @@ use crate::metrics::{DynMetrics, NopMetrics};
 use crate::room::Room;
 use bytes::Bytes;
 use dashmap::DashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::error;
@@ -236,15 +237,22 @@ impl Hub {
 
     /// Retrieves all member connection IDs in a room across the entire cluster.
     pub async fn get_cluster_presence(&self, room_name: &str) -> Vec<String> {
-        let adapter = self.adapter.read().await;
-        if let Ok(members) = adapter.get_presence(room_name).await {
-            if !members.is_empty() {
-                return members;
+        let mut member_set = HashSet::new();
+
+        if let Some(r) = self.get_room(room_name) {
+            for id in r.snapshot() {
+                member_set.insert(id);
             }
         }
-        self.get_room(room_name)
-            .map(|r| r.snapshot())
-            .unwrap_or_default()
+
+        let adapter = self.adapter.read().await;
+        if let Ok(members) = adapter.get_presence(room_name).await {
+            for id in members {
+                member_set.insert(id);
+            }
+        }
+
+        member_set.into_iter().collect()
     }
 
     /// Sends a direct message to a recipient using targeted node unicast.

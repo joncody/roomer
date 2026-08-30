@@ -38,6 +38,9 @@ const (
 // Authorize is a function that extracts authenticated claims from an HTTP request.
 type Authorize func(*http.Request) (map[string]string, error)
 
+// RoomAuthorize is a function validating if a connection can subscribe to a specific room.
+type RoomAuthorize func(c *Conn, room string) bool
+
 // MessageHandler processes a custom event message from a connection.
 type MessageHandler func(c *Conn, msg *Message) error
 
@@ -45,6 +48,7 @@ type MessageHandler func(c *Conn, msg *Message) error
 type Config struct {
 	Hub             *Hub
 	Authorize       Authorize
+	RoomAuthorize   RoomAuthorize
 	MaxMessageSize  int64
 	WriteWait       time.Duration
 	PongWait        time.Duration
@@ -90,10 +94,17 @@ func WithHub(h *Hub) Option {
 	}
 }
 
-// WithAuthorize sets the authorization function.
+// WithAuthorize sets the authorization function for connection upgrade.
 func WithAuthorize(auth Authorize) Option {
 	return func(c *Config) {
 		c.Authorize = auth
+	}
+}
+
+// WithRoomAuthorize sets the authorization function for room subscriptions.
+func WithRoomAuthorize(auth RoomAuthorize) Option {
+	return func(c *Config) {
+		c.RoomAuthorize = auth
 	}
 }
 

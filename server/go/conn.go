@@ -156,6 +156,12 @@ func (c *Conn) dispatch(msg *Message) {
 
 	switch msg.Event {
 	case "join":
+		if c.config.RoomAuthorize != nil && !c.config.RoomAuthorize(c, msg.Room) {
+			if c.config.Logger != nil {
+				c.config.Logger.Warn("Unauthorized room join attempt", "conn_id", c.ID, "room", msg.Room)
+			}
+			return
+		}
 		c.hub.joinRoom(msg.Room, c)
 		members := []byte("[]")
 		snap := c.hub.getClusterPresence(msg.Room)
@@ -266,14 +272,14 @@ func (c *Conn) writePump() {
 		select {
 		case msg, ok := <-c.send:
 			if !ok {
-				_ = c.write(websocket.CloseMessage, []byte{})
+				_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
 				return
 			}
 			if err := c.write(websocket.BinaryMessage, msg); err != nil {
 				return
 			}
 		case <-c.done:
-			_ = c.write(websocket.CloseMessage, []byte{})
+			_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
 			return
 		case <-ticker.C:
 			if err := c.write(websocket.PingMessage, nil); err != nil {

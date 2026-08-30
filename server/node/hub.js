@@ -24,6 +24,7 @@ const RESERVED_EVENTS = Object.freeze([
  * @param {object} [options] - Initial configuration options.
  * @param {object} [options.adapter] - Custom or Redis distributed adapter.
  * @param {object} [options.metrics] - Telemetry collector.
+ * @param {(conn: object, room: string) => boolean} [options.authorize_room] - Room subscription auth.
  * @returns {Readonly<object>} Frozen hub coordinator instance.
  */
 function create_hub(options) {
@@ -119,7 +120,7 @@ function create_hub(options) {
         });
     }
 
-    function join_room(name, conn) {
+    async function join_room(name, conn) {
         let room = rooms[name];
         if (room === undefined) {
             room = create_room(name);
@@ -130,7 +131,7 @@ function create_hub(options) {
         conn.track_room(name);
         room.add_member(conn);
 
-        adapter.add_presence(name, conn.id).catch(function () {});
+        await adapter.add_presence(name, conn.id).catch(function () {});
 
         const new_member_msg = create_message(name, "new_member", "", "", conn.id);
         broadcast_room(conn.id, new_member_msg);
@@ -160,19 +161,24 @@ function create_hub(options) {
     }
 
     async function get_cluster_presence(room_name) {
+        const member_set = Object.create(null);
+        const room = rooms[room_name];
+        if (room !== undefined) {
+            room.snapshot().forEach(function (id) {
+                member_set[id] = true;
+            });
+        }
+
         try {
             const members = await adapter.get_presence(room_name);
-            if (Array.isArray(members) && members.length > 0) {
-                return members;
+            if (Array.isArray(members)) {
+                members.forEach(function (id) {
+                    member_set[id] = true;
+                });
             }
         } catch (ignore) {}
 
-        const room = rooms[room_name];
-        return (
-            room !== undefined
-            ? room.snapshot()
-            : []
-        );
+        return Object.keys(member_set);
     }
 
     function send_direct_to_cluster(msg) {
@@ -188,7 +194,13 @@ function create_hub(options) {
     async function dispatch(conn, msg) {
         switch (msg.event) {
         case "join": {
-            join_room(msg.room, conn);
+            if (typeof opts.authorize_room === "function") {
+                const allowed = opts.authorize_room(conn, msg.room);
+                if (allowed === false) {
+                    break;
+                }
+            }
+            await join_room(msg.room, conn);
             const presence = await get_cluster_presence(msg.room);
             const ack = create_message(
                 msg.room,

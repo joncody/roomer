@@ -412,6 +412,7 @@ class RoomerClient:
         self._manual_close: bool = False
         self._task: asyncio.Task[None] | None = None
         self._reconnect_delay: float = initial_delay
+        self._send_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
         self._root = self.get_room("root")
 
@@ -466,13 +467,12 @@ class RoomerClient:
         src: str,
         payload: Any
     ) -> None:
-        """Serializes and transmits a binary frame over the WebSocket."""
-        if self.is_connected() and self._ws is not None:
+        """Serializes and enqueues a binary frame for ordered transmission over WebSocket."""
+        if self.is_connected():
             raw = encode_message(room, event, dst, src, payload)
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._ws.send(raw))
-            except RuntimeError:
+                self._send_queue.put_nowait(raw)
+            except (asyncio.QueueFull, RuntimeError):
                 pass
 
     async def connect(self) -> Room:
@@ -487,15 +487,30 @@ class RoomerClient:
         while self._running and not self._root.is_open:
             await asyncio.sleep(0.010)
 
+        if not self._root.is_open and not self._running:
+            raise ConnectionError(f"Failed to connect to Roomer server at {self.url}")
+
         return self._root
 
     async def _run_loop(self) -> None:
-        """Background connection supervisor with exponential backoff and jitter."""
+        """Background connection supervisor with ordered writer task, backoff, and jitter."""
         while self._running:
+            writer_task: asyncio.Task[None] | None = None
             try:
                 async with websockets.connect(self.url) as ws:
                     self._ws = ws
                     self._reconnect_delay = self.initial_delay
+
+                    async def _writer_loop() -> None:
+                        while self._running and self._ws is ws:
+                            try:
+                                raw = await self._send_queue.get()
+                                await ws.send(raw)
+                                self._send_queue.task_done()
+                            except (asyncio.CancelledError, OSError, websockets.exceptions.WebSocketException):
+                                break
+
+                    writer_task = asyncio.create_task(_writer_loop())
 
                     # Re-join all non-root active rooms upon reconnection
                     for r_name in list(self._rooms.keys()):
@@ -513,12 +528,19 @@ class RoomerClient:
             except (websockets.exceptions.WebSocketException, OSError, asyncio.CancelledError):
                 pass
             finally:
+                if writer_task is not None:
+                    writer_task.cancel()
+                    try:
+                        await writer_task
+                    except asyncio.CancelledError:
+                        pass
                 self._ws = None
                 is_reconnecting = self.reconnect and not self._manual_close and self._running
                 for r in list(self._rooms.values()):
                     r.force_close(is_disconnect=is_reconnecting)
 
             if not self.reconnect or self._manual_close or not self._running:
+                self._running = False
                 break
 
             jitter = random.uniform(0, 0.200)

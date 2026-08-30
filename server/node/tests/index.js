@@ -5,12 +5,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import Redis from "ioredis";
 import {
     create_message,
     decode_message,
     create_hub,
     create_conn,
     create_local_adapter,
+    create_redis_adapter,
     create_in_memory_metrics,
     encode_envelope,
     decode_envelope,
@@ -116,8 +118,8 @@ test("Hub: Atomic join, leave, presence tracking, and empty room cleanup", async
     hub.add_conn(c1);
     hub.add_conn(c2);
 
-    hub.join_room("lobby", c1);
-    hub.join_room("lobby", c2);
+    await hub.join_room("lobby", c1);
+    await hub.join_room("lobby", c2);
 
     const room = hub.get_room("lobby");
     assert.ok(room !== undefined);
@@ -251,7 +253,7 @@ test("Custom Adapter: User-provided mock adapter integrates seamlessly", async f
     const conn = create_conn("c1", create_mock_ws(), hub);
 
     hub.add_conn(conn);
-    hub.join_room("news", conn);
+    await hub.join_room("news", conn);
 
     // Broadcast triggers custom adapter publish
     const msg = create_message("news", "headline", "", "c1", "Breaking news");
@@ -266,10 +268,12 @@ test("Custom Adapter: User-provided mock adapter integrates seamlessly", async f
     assert.ok(headline_msg !== undefined, "Headline message should be published to custom adapter");
     assert.equal(headline_msg.payloadString(), "Breaking news");
 
-    // Presence comes from custom adapter
+    // Presence is the union of local member c1 and remote cluster presence (user_mock_1, user_mock_2)
     const presence = await hub.get_cluster_presence("news");
-    assert.equal(presence.length, 2);
-    assert.equal(presence[0], "user_mock_1");
+    assert.equal(presence.length, 3);
+    assert.ok(presence.includes("c1"));
+    assert.ok(presence.includes("user_mock_1"));
+    assert.ok(presence.includes("user_mock_2"));
 });
 
 // -----------------------------------------------------------------------------
@@ -293,10 +297,10 @@ test("Concurrency: 50 concurrent connections joining, messaging, and leaving", a
     assert.equal(metrics.getStats().active_connections, total_conns);
 
     // Concurrently join 5 different rooms
-    conns.forEach(function (c, idx) {
+    await Promise.all(conns.map(function (c, idx) {
         const room_name = "room_" + (idx % 5);
-        hub.join_room(room_name, c);
-    });
+        return hub.join_room(room_name, c);
+    }));
 
     assert.equal(metrics.getStats().active_rooms, 5);
 
@@ -316,4 +320,96 @@ test("Concurrency: 50 concurrent connections joining, messaging, and leaving", a
 
     assert.equal(metrics.getStats().active_connections, 0);
     assert.equal(metrics.getStats().active_rooms, 0);
+});
+
+// -----------------------------------------------------------------------------
+// 7. Live Redis Adapter Cluster Sync, Suppression & Presence Integration Test
+// -----------------------------------------------------------------------------
+
+test("Live Redis: Two-node cluster synchronization, loopback suppression, and presence", async function (t) {
+    const redis_addr = process.env.REDIS_ADDR || "localhost:6379";
+    let redis_url = redis_addr;
+    if (
+        redis_url.startsWith("redis://") === false &&
+        redis_url.startsWith("rediss://") === false
+    ) {
+        redis_url = "redis://" + redis_url;
+    }
+
+    const pub_a = new Redis(redis_url, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 1000 });
+    const sub_a = pub_a.duplicate();
+    const pub_b = new Redis(redis_url, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 1000 });
+    const sub_b = pub_b.duplicate();
+
+    try {
+        await pub_a.connect();
+        await sub_a.connect();
+        await pub_b.connect();
+        await sub_b.connect();
+    } catch (err) {
+        t.skip("Skipping live Redis integration test: Redis not reachable at " + redis_addr);
+        pub_a.disconnect();
+        sub_a.disconnect();
+        pub_b.disconnect();
+        sub_b.disconnect();
+        return;
+    }
+
+    const prefix = "roomer:test:" + Date.now() + ":";
+    const node_a = create_redis_adapter(pub_a, sub_a, { node_id: "server_node_A", prefix });
+    const node_b = create_redis_adapter(pub_b, sub_b, { node_id: "server_node_B", prefix });
+
+    let node_a_received = 0;
+    let node_b_received = 0;
+
+    await node_a.subscribe(function (_channel, _sender, _raw) {
+        node_a_received += 1;
+    });
+
+    await node_b.subscribe(function (_channel, _sender, _raw) {
+        node_b_received += 1;
+    });
+
+    // 1. Verify Cluster Presence Synchronization
+    await node_a.add_presence("lobby", "client_on_A");
+    await node_b.add_presence("lobby", "client_on_B");
+
+    const presence = await node_a.get_presence("lobby");
+    assert.equal(presence.length, 2, "Presence set must contain members across all nodes");
+    assert.ok(presence.includes("client_on_A"));
+    assert.ok(presence.includes("client_on_B"));
+
+    // 2. Verify Node Registry & Targeted Unicast Routing
+    await node_b.register_node("client_on_B");
+    const target_node = await node_a.get_node_for_conn("client_on_B");
+    assert.equal(target_node, "server_node_B");
+
+    // 3. Verify Broadcast Delivery and Loopback Suppression
+    const total_messages = 50;
+    for (let i = 0; i < total_messages; i += 1) {
+        const msg = create_message("lobby", "chat", "", "client_on_A", "msg_" + i);
+        await node_a.publish("lobby", msg);
+    }
+
+    // Wait up to 3 seconds for messages to arrive at Node B
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+        if (node_b_received >= total_messages) {
+            break;
+        }
+        await new Promise(function (resolve) {
+            setTimeout(resolve, 20);
+        });
+    }
+
+    assert.equal(node_b_received, total_messages, "Node B must receive all broadcast messages");
+    assert.equal(node_a_received, 0, "Node A must receive 0 messages (loopback suppressed)");
+
+    // 4. Cleanup Presence and Close Connections
+    await node_a.remove_presence("lobby", "client_on_A");
+    await node_b.remove_presence("lobby", "client_on_B");
+    await node_b.unregister_node("client_on_B");
+
+    await node_a.close();
+    await node_b.close();
 });

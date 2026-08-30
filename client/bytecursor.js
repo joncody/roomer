@@ -425,6 +425,9 @@ function bytecursor(buffer, view_offset, view_length) {
                 view.byteLength - cursor
             );
             const result = encoder.encodeInto(string, target);
+            if (result.read < string.length) {
+                throw new RangeError("Offset + size exceeds view bounds");
+            }
             advance(result.written);
             return self;
         }

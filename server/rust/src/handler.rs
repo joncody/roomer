@@ -94,6 +94,9 @@ impl ServerConfig {
 pub type AuthorizeFn =
     Arc<dyn Fn(&HeaderMap, &Uri) -> Result<HashMap<String, String>, AuthError> + Send + Sync>;
 
+/// Authorization callback validating room subscription permissions.
+pub type RoomAuthFn = Arc<dyn Fn(&Conn, &str) -> bool + Send + Sync>;
+
 /// Axum shared state container for the WebSocket handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -101,8 +104,10 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     /// Server configuration parameters.
     pub config: ServerConfig,
-    /// Optional authorization validator.
+    /// Optional connection upgrade authorization validator.
     pub auth: Option<AuthorizeFn>,
+    /// Optional room subscription authorization validator.
+    pub room_auth: Option<RoomAuthFn>,
 }
 
 impl AppState {
@@ -112,6 +117,7 @@ impl AppState {
             hub,
             config: ServerConfig::default(),
             auth: None,
+            room_auth: None,
         }
     }
 
@@ -121,9 +127,15 @@ impl AppState {
         self
     }
 
-    /// Attaches an authorization function.
+    /// Attaches an upgrade authorization function.
     pub fn with_auth(mut self, auth: AuthorizeFn) -> Self {
         self.auth = Some(auth);
+        self
+    }
+
+    /// Attaches a room subscription authorization function.
+    pub fn with_room_auth(mut self, auth: RoomAuthFn) -> Self {
+        self.room_auth = Some(auth);
         self
     }
 }
@@ -258,13 +270,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
     let hub = state.hub.clone();
     let conn_for_reader = conn.clone();
     let last_activity_reader = last_activity_ms.clone();
+    let room_auth_checker = state.room_auth.clone();
 
     let reader_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 ws::Message::Binary(bin) => {
+                    let elapsed = tokio::time::Instant::now()
+                        .duration_since(start_instant)
+                        .as_millis() as u64;
+                    last_activity_reader.store(elapsed, Ordering::Relaxed);
+
                     conn_for_reader.metrics.on_message_received(bin.len());
                     if let Some(packet) = Message::decode(bin) {
+                        if packet.event == "join" {
+                            if let Some(ref auth) = room_auth_checker {
+                                if !auth(&conn_for_reader, &packet.room) {
+                                    continue;
+                                }
+                            }
+                        }
                         hub.dispatch(conn_for_reader.clone(), packet).await;
                     }
                 }

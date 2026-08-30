@@ -204,22 +204,30 @@ func (a *Adapter) PublishDirect(ctx context.Context, targetNodeID string, msg *r
 	return a.client.Publish(pubCtx, channel, envelope).Err()
 }
 
-// AddPresence adds a connection ID to a room's cluster-wide presence set.
+// AddPresence adds a connection ID to a room's cluster-wide presence set using sorted sets for eviction.
 func (a *Adapter) AddPresence(ctx context.Context, room, connID string) error {
 	key := a.prefix + "presence:" + room
-	return a.client.SAdd(ctx, key, connID).Err()
+	now := float64(time.Now().Unix())
+	return a.client.ZAdd(ctx, key, goredis.Z{Score: now, Member: connID}).Err()
 }
 
 // RemovePresence removes a connection ID from a room's cluster-wide presence set.
 func (a *Adapter) RemovePresence(ctx context.Context, room, connID string) error {
 	key := a.prefix + "presence:" + room
-	return a.client.SRem(ctx, key, connID).Err()
+	return a.client.ZRem(ctx, key, connID).Err()
 }
 
-// GetPresence retrieves all connection IDs in a room across the entire cluster.
+// GetPresence retrieves all connection IDs in a room across the cluster, pruning expired entries older than 24h.
 func (a *Adapter) GetPresence(ctx context.Context, room string) ([]string, error) {
 	key := a.prefix + "presence:" + room
-	return a.client.SMembers(ctx, key).Result()
+	now := time.Now().Unix()
+	minScore := fmt.Sprintf("%d", now-86400)
+
+	_ = a.client.ZRemRangeByScore(ctx, key, "-inf", minScore).Err()
+	return a.client.ZRangeByScore(ctx, key, &goredis.ZRangeBy{
+		Min: minScore,
+		Max: "+inf",
+	}).Result()
 }
 
 // RegisterNode maps a connection ID to this node ID with a 24-hour expiration.

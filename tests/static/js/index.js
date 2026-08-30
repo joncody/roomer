@@ -127,25 +127,29 @@ function create_test_runner() {
 
 function encode_packet(room, event, dst, src, payload_str) {
     const encoder = new TextEncoder();
+    const room_bytes = encoder.encode(room);
+    const event_bytes = encoder.encode(event);
+    const dst_bytes = encoder.encode(dst);
+    const src_bytes = encoder.encode(src);
     const payload_bytes = encoder.encode(payload_str);
     const total_bytes = (
-        room.length +
-        event.length +
-        dst.length +
-        src.length +
+        room_bytes.byteLength +
+        event_bytes.byteLength +
+        dst_bytes.byteLength +
+        src_bytes.byteLength +
         payload_bytes.byteLength +
         20
     );
 
     const data = bytecursor(new ArrayBuffer(total_bytes));
-    data.writeUint32(room.length);
-    data.writeString(room);
-    data.writeUint32(event.length);
-    data.writeString(event);
-    data.writeUint32(dst.length);
-    data.writeString(dst);
-    data.writeUint32(src.length);
-    data.writeString(src);
+    data.writeUint32(room_bytes.byteLength);
+    data.writeBytes(room_bytes);
+    data.writeUint32(event_bytes.byteLength);
+    data.writeBytes(event_bytes);
+    data.writeUint32(dst_bytes.byteLength);
+    data.writeBytes(dst_bytes);
+    data.writeUint32(src_bytes.byteLength);
+    data.writeBytes(src_bytes);
     data.writeUint32(payload_bytes.byteLength);
     data.writeBytes(payload_bytes);
 

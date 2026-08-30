@@ -87,7 +87,6 @@ function create_redis_adapter(pub_client, sub_client, options) {
     async function publish_raw(room, raw_msg) {
         const channel = prefix_val + room;
         const envelope = encode_envelope(node_id_val, raw_msg);
-        // Use pub_client.publish (ioredis natively handles Buffer arguments)
         await pub_client.publish(channel, envelope);
     }
 
@@ -107,17 +106,21 @@ function create_redis_adapter(pub_client, sub_client, options) {
 
     async function add_presence(room, conn_id) {
         const key = prefix_val + "presence:" + room;
-        await pub_client.sadd(key, conn_id);
+        const score = Math.floor(Date.now() / 1000);
+        await pub_client.zadd(key, score, conn_id);
     }
 
     async function remove_presence(room, conn_id) {
         const key = prefix_val + "presence:" + room;
-        await pub_client.srem(key, conn_id);
+        await pub_client.zrem(key, conn_id);
     }
 
     async function get_presence(room) {
         const key = prefix_val + "presence:" + room;
-        return await pub_client.smembers(key);
+        const now = Math.floor(Date.now() / 1000);
+        const min_score = now - 86400;
+        await pub_client.zremrangebyscore(key, "-inf", min_score).catch(function () {});
+        return await pub_client.zrangebyscore(key, min_score, "+inf");
     }
 
     async function register_node(conn_id) {

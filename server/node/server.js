@@ -28,6 +28,7 @@ function create_roomer_server(http_server, options) {
         ? opts.hub
         : create_hub({
             adapter: opts.adapter,
+            authorize_room: opts.authorize_room,
             metrics: opts.metrics
         })
     );
