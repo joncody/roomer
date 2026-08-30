@@ -1,6 +1,6 @@
 # `roomer` – Rust Server Implementation
 
-[![Crates.io](https://img.shields.io/badge/crates.io-roomer-orange.svg)](https://crates.io/crates/roomer)
+[![Crates.io Version](https://img.shields.io/crates/v/roomer.svg)](https://crates.io/crates/roomer)
 [![Rust Version](https://img.shields.io/badge/Rust-1.88%2B-DEA584?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Rust Edition](https://img.shields.io/badge/Edition-2024-000000?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
