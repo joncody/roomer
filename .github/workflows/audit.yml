@@ -2,18 +2,27 @@ name: Security & Audit
 
 on:
   push:
-    branches: [main]
-  schedule:
-    - cron: '0 0 * * 0' # Every Sunday
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  audit:
+  audit-deny:
     name: Cargo Audit & Deny
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/rust
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Run Cargo Deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          manifest-path: server/rust/Cargo.toml
+          command: check
+          arguments: --manifest-path server/rust/Cargo.toml --config server/rust/deny.toml

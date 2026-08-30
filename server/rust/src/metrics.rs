@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Trait defining telemetry and observability hooks.
 pub trait Metrics: Send + Sync + 'static {
@@ -131,7 +131,8 @@ impl Metrics for InMemoryMetrics {
 
     fn on_message_received(&self, bytes: usize) {
         self.messages_received.fetch_add(1, Ordering::Relaxed);
-        self.bytes_received.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.bytes_received
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn on_message_dropped(&self) {
@@ -149,11 +150,13 @@ impl Metrics for InMemoryMetrics {
 
     fn on_cluster_publish(&self, bytes: usize) {
         self.cluster_published.fetch_add(1, Ordering::Relaxed);
-        self.cluster_bytes_published.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.cluster_bytes_published
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn on_cluster_received(&self, bytes: usize) {
         self.cluster_received.fetch_add(1, Ordering::Relaxed);
-        self.cluster_bytes_received.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.cluster_bytes_received
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 }

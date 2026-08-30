@@ -1,8 +1,6 @@
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use bytes::Bytes;
-use roomer::{
-    ws_handler, AppState, Hub, InMemoryMetrics, Message, RedisAdapter, ServerConfig,
-};
+use roomer::{AppState, Hub, InMemoryMetrics, Message, RedisAdapter, ServerConfig, ws_handler};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,8 +24,7 @@ fn find_existing_path(candidates: &[&str]) -> PathBuf {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -88,9 +85,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve static asset paths dynamically across root, subfolder, and container execution
     let client_dir = find_existing_path(&["../../client", "client", "../client"]);
-    let static_dir = find_existing_path(&["../../examples/static", "examples/static", "../examples/static", "static"]);
+    let static_dir = find_existing_path(&[
+        "../../examples/static",
+        "examples/static",
+        "../examples/static",
+        "static",
+    ]);
     let tests_dir = find_existing_path(&["../../tests", "tests", "../tests"]);
-    let index_file = find_existing_path(&["../../examples/index.html", "examples/index.html", "../examples/index.html"]);
+    let index_file = find_existing_path(&[
+        "../../examples/index.html",
+        "examples/index.html",
+        "../examples/index.html",
+    ]);
 
     let app = Router::new()
         .route("/ws", get(ws_handler))

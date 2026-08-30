@@ -2,14 +2,20 @@
 mod redis_tests {
     use bytes::Bytes;
     use roomer::{Adapter, Message, RedisAdapter};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     #[test]
     fn test_redis_envelope_encoding_decoding() {
         let node_id = "node-alpha-123";
-        let original_msg = Message::new("lobby", "chat", "", "user_1", Bytes::from_static(b"cluster test"));
+        let original_msg = Message::new(
+            "lobby",
+            "chat",
+            "",
+            "user_1",
+            Bytes::from_static(b"cluster test"),
+        );
         let raw_bytes = original_msg.encode();
 
         let envelope = RedisAdapter::encode_envelope(node_id, &raw_bytes);
@@ -23,7 +29,8 @@ mod redis_tests {
 
     #[tokio::test]
     async fn test_live_redis_two_node_sync_and_presence() {
-        let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
 
         // Skip test if no local Redis server is running
         let client = match ::redis::Client::open(redis_url.clone()) {
@@ -73,7 +80,11 @@ mod redis_tests {
         node_b.add_presence("lobby", "client_on_B").await.unwrap();
 
         let presence = node_a.get_presence("lobby").await.unwrap();
-        assert_eq!(presence.len(), 2, "Presence set must return members across all cluster nodes");
+        assert_eq!(
+            presence.len(),
+            2,
+            "Presence set must return members across all cluster nodes"
+        );
         assert!(presence.contains(&"client_on_A".to_string()));
         assert!(presence.contains(&"client_on_B".to_string()));
 
@@ -82,7 +93,13 @@ mod redis_tests {
         let target_node = node_a.get_node_for_conn("client_on_B").await.unwrap();
         assert_eq!(target_node, Some("node_B".to_string()));
 
-        let dm = Message::new("root", "dm", "client_on_B", "client_on_A", Bytes::from_static(b"unicast"));
+        let dm = Message::new(
+            "root",
+            "dm",
+            "client_on_B",
+            "client_on_A",
+            Bytes::from_static(b"unicast"),
+        );
         node_a.publish_direct("node_B", &dm).await.unwrap();
 
         // Allow Redis subscription to register
@@ -104,12 +121,25 @@ mod redis_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        assert!(node_b_received.load(Ordering::SeqCst) >= total, "Node B must receive messages from Node A");
-        assert_eq!(node_a_received.load(Ordering::SeqCst), 0, "Node A must receive 0 (loopback suppressed)");
+        assert!(
+            node_b_received.load(Ordering::SeqCst) >= total,
+            "Node B must receive messages from Node A"
+        );
+        assert_eq!(
+            node_a_received.load(Ordering::SeqCst),
+            0,
+            "Node A must receive 0 (loopback suppressed)"
+        );
 
         // Cleanup presence
-        node_a.remove_presence("lobby", "client_on_A").await.unwrap();
-        node_b.remove_presence("lobby", "client_on_B").await.unwrap();
+        node_a
+            .remove_presence("lobby", "client_on_A")
+            .await
+            .unwrap();
+        node_b
+            .remove_presence("lobby", "client_on_B")
+            .await
+            .unwrap();
         node_b.unregister_node("client_on_B").await.unwrap();
 
         node_a.close().await.unwrap();

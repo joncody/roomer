@@ -1,7 +1,7 @@
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use roomer::{ws_handler, AppState, Hub, Message, ServerConfig};
+use roomer::{AppState, Hub, Message, ServerConfig, ws_handler};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -36,7 +36,9 @@ where
 async fn test_full_websocket_lifecycle_over_tcp() {
     let hub = Hub::new();
     let state = AppState::new(hub.clone()).with_config(ServerConfig::default());
-    let app = Router::new().route("/ws", get(ws_handler)).with_state(state);
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -71,7 +73,10 @@ async fn test_full_websocket_lifecycle_over_tcp() {
 
     // 4. Client 1 joins "game" room (pass `Bytes` directly with zero-copy)
     let join_game = Message::new("game", "join", "", "", Bytes::new());
-    client1.send(TungsteniteMsg::Binary(join_game.encode())).await.unwrap();
+    client1
+        .send(TungsteniteMsg::Binary(join_game.encode()))
+        .await
+        .unwrap();
 
     let c1_game_ack = recv_msg(&mut client1).await;
     assert_eq!(c1_game_ack.room, "game");
@@ -79,7 +84,10 @@ async fn test_full_websocket_lifecycle_over_tcp() {
 
     // 5. Client 2 joins "game" room
     let join_game_c2 = Message::new("game", "join", "", "", Bytes::new());
-    client2.send(TungsteniteMsg::Binary(join_game_c2.encode())).await.unwrap();
+    client2
+        .send(TungsteniteMsg::Binary(join_game_c2.encode()))
+        .await
+        .unwrap();
 
     let c2_game_ack = recv_msg(&mut client2).await;
     assert_eq!(c2_game_ack.room, "game");
@@ -93,7 +101,10 @@ async fn test_full_websocket_lifecycle_over_tcp() {
 
     // 7. Client 2 sends a "chat" broadcast to "game"
     let chat = Message::new("game", "chat", "", "", Bytes::from_static(b"Hello Game!"));
-    client2.send(TungsteniteMsg::Binary(chat.encode())).await.unwrap();
+    client2
+        .send(TungsteniteMsg::Binary(chat.encode()))
+        .await
+        .unwrap();
 
     let c1_chat = recv_msg(&mut client1).await;
     assert_eq!(c1_chat.room, "game");
@@ -103,7 +114,10 @@ async fn test_full_websocket_lifecycle_over_tcp() {
 
     // 8. Client 2 leaves "game" room
     let leave_game = Message::new("game", "leave", "", "", Bytes::new());
-    client2.send(TungsteniteMsg::Binary(leave_game.encode())).await.unwrap();
+    client2
+        .send(TungsteniteMsg::Binary(leave_game.encode()))
+        .await
+        .unwrap();
 
     let c2_leave_ack = recv_msg(&mut client2).await;
     assert_eq!(c2_leave_ack.room, "game");

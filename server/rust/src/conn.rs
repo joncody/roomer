@@ -53,7 +53,13 @@ impl Conn {
         send_tx: mpsc::Sender<OutboundMessage>,
         metrics: DynMetrics,
     ) -> Arc<Self> {
-        Self::with_backpressure(id, claims, send_tx, metrics, BackpressureStrategy::default())
+        Self::with_backpressure(
+            id,
+            claims,
+            send_tx,
+            metrics,
+            BackpressureStrategy::default(),
+        )
     }
 
     /// Constructs a new `Conn` with an explicit backpressure strategy.

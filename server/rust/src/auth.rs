@@ -45,7 +45,10 @@ impl BearerAuth {
     ///
     /// # Errors
     /// Returns `AuthError` if extraction fails.
-    pub fn authenticate(headers: &HeaderMap, _uri: &Uri) -> Result<HashMap<String, String>, AuthError> {
+    pub fn authenticate(
+        headers: &HeaderMap,
+        _uri: &Uri,
+    ) -> Result<HashMap<String, String>, AuthError> {
         let token = extract_bearer_token(headers)?;
         let mut claims = HashMap::with_capacity(1);
         claims.insert("token".to_string(), token.to_string());
@@ -62,7 +65,10 @@ impl QueryAuth {
     ///
     /// # Errors
     /// Returns `AuthError` if the query parameter is not found.
-    pub fn authenticate(_headers: &HeaderMap, uri: &Uri) -> Result<HashMap<String, String>, AuthError> {
+    pub fn authenticate(
+        _headers: &HeaderMap,
+        uri: &Uri,
+    ) -> Result<HashMap<String, String>, AuthError> {
         let token = extract_query_param(uri, "token")
             .ok_or_else(|| AuthError::Unauthorized("Missing 'token' query parameter".into()))?;
         let mut claims = HashMap::with_capacity(1);

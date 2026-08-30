@@ -22,12 +22,20 @@ pub trait Adapter: Send + Sync + 'static {
     async fn publish_raw(&self, room: &str, raw_msg: &[u8]) -> Result<(), AdapterError>;
 
     /// Publishes a message directly to a specific target cluster node (unicast).
-    async fn publish_direct(&self, target_node_id: &str, msg: &Message) -> Result<(), AdapterError> {
+    async fn publish_direct(
+        &self,
+        target_node_id: &str,
+        msg: &Message,
+    ) -> Result<(), AdapterError> {
         self.publish_direct_raw(target_node_id, &msg.encode()).await
     }
 
     /// Publishes a raw binary message frame directly to a specific target cluster node (unicast).
-    async fn publish_direct_raw(&self, target_node_id: &str, raw_msg: &[u8]) -> Result<(), AdapterError>;
+    async fn publish_direct_raw(
+        &self,
+        target_node_id: &str,
+        raw_msg: &[u8],
+    ) -> Result<(), AdapterError>;
 
     /// Subscribes to cluster messages and invokes the given callback.
     async fn subscribe(&self, callback: SubscribeCallback) -> Result<(), AdapterError>;
@@ -72,10 +80,18 @@ impl Adapter for LocalAdapter {
     async fn publish_raw(&self, _room: &str, _raw_msg: &[u8]) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn publish_direct(&self, _target_node_id: &str, _msg: &Message) -> Result<(), AdapterError> {
+    async fn publish_direct(
+        &self,
+        _target_node_id: &str,
+        _msg: &Message,
+    ) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn publish_direct_raw(&self, _target_node_id: &str, _raw_msg: &[u8]) -> Result<(), AdapterError> {
+    async fn publish_direct_raw(
+        &self,
+        _target_node_id: &str,
+        _raw_msg: &[u8],
+    ) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn subscribe(&self, _callback: SubscribeCallback) -> Result<(), AdapterError> {
@@ -102,7 +118,8 @@ impl Adapter for LocalAdapter {
             .unwrap_or_default())
     }
     async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError> {
-        self.node_map.insert(conn_id.to_string(), "local-node".into());
+        self.node_map
+            .insert(conn_id.to_string(), "local-node".into());
         Ok(())
     }
     async fn unregister_node(&self, conn_id: &str) -> Result<(), AdapterError> {
@@ -133,7 +150,7 @@ pub mod redis {
     use futures_util::StreamExt;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::{oneshot, RwLock};
+    use tokio::sync::{RwLock, oneshot};
     use tracing::{error, info, warn};
     use uuid::Uuid;
 
@@ -231,7 +248,9 @@ pub mod redis {
             RedisAdapterBuilder::new(redis_url)
         }
 
-        async fn get_publish_conn(&self) -> Result<::redis::aio::MultiplexedConnection, AdapterError> {
+        async fn get_publish_conn(
+            &self,
+        ) -> Result<::redis::aio::MultiplexedConnection, AdapterError> {
             {
                 let guard = self.multiplexed_conn.read().await;
                 if let Some(ref conn) = *guard {
@@ -306,11 +325,19 @@ pub mod redis {
             Ok(())
         }
 
-        async fn publish_direct(&self, target_node_id: &str, msg: &Message) -> Result<(), AdapterError> {
+        async fn publish_direct(
+            &self,
+            target_node_id: &str,
+            msg: &Message,
+        ) -> Result<(), AdapterError> {
             self.publish_direct_raw(target_node_id, &msg.encode()).await
         }
 
-        async fn publish_direct_raw(&self, target_node_id: &str, raw_msg: &[u8]) -> Result<(), AdapterError> {
+        async fn publish_direct_raw(
+            &self,
+            target_node_id: &str,
+            raw_msg: &[u8],
+        ) -> Result<(), AdapterError> {
             let mut conn = self.get_publish_conn().await?;
             let channel = format!("{}node:{}", self.prefix, target_node_id);
             let payload = Self::encode_envelope(&self.node_id, raw_msg);

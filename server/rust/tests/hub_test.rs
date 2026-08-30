@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 async fn test_hub_concurrent_join_leave_and_direct_routing() {
     let metrics = Arc::new(InMemoryMetrics::new());
     let hub = Hub::new();
-    hub.configure(Arc::new(roomer::LocalAdapter::default()), metrics.clone()).await;
+    hub.configure(Arc::new(roomer::LocalAdapter::default()), metrics.clone())
+        .await;
 
     let (tx1, _rx1) = mpsc::channel(100);
     let (tx2, mut rx2) = mpsc::channel(100);
@@ -30,10 +31,19 @@ async fn test_hub_concurrent_join_leave_and_direct_routing() {
     assert_eq!(presence.len(), 2);
 
     // Direct message: user_1 -> user_2
-    let dm = Message::new("root", "dm", "user_2", "user_1", Bytes::from_static(b"secret"));
+    let dm = Message::new(
+        "root",
+        "dm",
+        "user_2",
+        "user_1",
+        Bytes::from_static(b"secret"),
+    );
     hub.dispatch(c1.clone(), dm).await;
 
-    let received = rx2.recv().await.expect("user_2 should receive direct message");
+    let received = rx2
+        .recv()
+        .await
+        .expect("user_2 should receive direct message");
     match received {
         OutboundMessage::Binary(bin) => {
             let parsed = Message::decode(bin).expect("valid frame");
@@ -49,7 +59,10 @@ async fn test_hub_concurrent_join_leave_and_direct_routing() {
     assert_eq!(room.snapshot().len(), 1);
 
     hub.leave_room("lobby", &c2);
-    assert!(hub.get_room("lobby").is_none(), "empty room should be garbage collected");
+    assert!(
+        hub.get_room("lobby").is_none(),
+        "empty room should be garbage collected"
+    );
     assert_eq!(metrics.active_rooms(), 0);
 }
 

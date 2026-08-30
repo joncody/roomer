@@ -24,8 +24,13 @@ pub const RESERVED_EVENTS: &[&str] = &[
 
 /// Type signature for custom registered asynchronous message handlers.
 pub type MessageHandler = Arc<
-    dyn Fn(Arc<Conn>, Message) -> futures_util::future::BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>
-        + Send
+    dyn Fn(
+            Arc<Conn>,
+            Message,
+        ) -> futures_util::future::BoxFuture<
+            'static,
+            Result<(), Box<dyn std::error::Error + Send + Sync>>,
+        > + Send
         + Sync
         + 'static,
 >;
@@ -103,7 +108,11 @@ impl Hub {
     /// # Errors
     /// Returns `HandlerError::ReservedEvent` if the name is reserved,
     /// or `HandlerError::DuplicateHandler` if already registered.
-    pub fn register_handler(&self, event: &str, handler: MessageHandler) -> Result<(), HandlerError> {
+    pub fn register_handler(
+        &self,
+        event: &str,
+        handler: MessageHandler,
+    ) -> Result<(), HandlerError> {
         if RESERVED_EVENTS.contains(&event) {
             return Err(HandlerError::ReservedEvent(event.to_string()));
         }
@@ -178,7 +187,13 @@ impl Hub {
             });
         }
 
-        let new_member_msg = Message::new(name, "new_member", "", "", Bytes::copy_from_slice(conn.id.as_bytes()));
+        let new_member_msg = Message::new(
+            name,
+            "new_member",
+            "",
+            "",
+            Bytes::copy_from_slice(conn.id.as_bytes()),
+        );
         self.broadcast_room(Some(&conn.id), new_member_msg);
     }
 
@@ -201,7 +216,13 @@ impl Hub {
                 });
             }
 
-            let left_msg = Message::new(name, "member_left", "", "", Bytes::copy_from_slice(conn.id.as_bytes()));
+            let left_msg = Message::new(
+                name,
+                "member_left",
+                "",
+                "",
+                Bytes::copy_from_slice(conn.id.as_bytes()),
+            );
             self.broadcast_room(Some(&conn.id), left_msg);
         }
     }
@@ -221,7 +242,9 @@ impl Hub {
                 return members;
             }
         }
-        self.get_room(room_name).map(|r| r.snapshot()).unwrap_or_default()
+        self.get_room(room_name)
+            .map(|r| r.snapshot())
+            .unwrap_or_default()
     }
 
     /// Sends a direct message to a recipient using targeted node unicast.
@@ -233,7 +256,11 @@ impl Hub {
             handle.spawn(async move {
                 let adapter = adapter_lock.read().await;
                 if let Ok(Some(target_node)) = adapter.get_node_for_conn(&dst_id_str).await {
-                    if adapter.publish_direct_raw(&target_node, &encoded).await.is_ok() {
+                    if adapter
+                        .publish_direct_raw(&target_node, &encoded)
+                        .await
+                        .is_ok()
+                    {
                         return;
                     }
                 }
@@ -272,12 +299,24 @@ impl Hub {
                 self.join_room(&msg.room, conn.clone());
                 let snap = self.get_cluster_presence(&msg.room).await;
                 let members_json = serde_json::to_vec(&snap).unwrap_or_else(|_| b"[]".to_vec());
-                let ack = Message::new(&msg.room, "join_ack", "", &conn.id, Bytes::from(members_json));
+                let ack = Message::new(
+                    &msg.room,
+                    "join_ack",
+                    "",
+                    &conn.id,
+                    Bytes::from(members_json),
+                );
                 conn.try_send(ack.encode());
             }
             "leave" => {
                 self.leave_room(&msg.room, &conn);
-                let ack = Message::new(&msg.room, "leave_ack", "", &conn.id, Bytes::copy_from_slice(conn.id.as_bytes()));
+                let ack = Message::new(
+                    &msg.room,
+                    "leave_ack",
+                    "",
+                    &conn.id,
+                    Bytes::copy_from_slice(conn.id.as_bytes()),
+                );
                 conn.try_send(ack.encode());
             }
             _ => {

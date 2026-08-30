@@ -4,8 +4,8 @@ use crate::hub::Hub;
 use crate::message::Message;
 use axum::{
     extract::{
-        ws::{self, WebSocket},
         State, WebSocketUpgrade,
+        ws::{self, WebSocket},
     },
     http::{HeaderMap, Uri},
     response::IntoResponse,
@@ -13,8 +13,8 @@ use axum::{
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -91,7 +91,8 @@ impl ServerConfig {
 }
 
 /// Authorization callback extracting claims from headers and URI during WebSocket upgrade.
-pub type AuthorizeFn = Arc<dyn Fn(&HeaderMap, &Uri) -> Result<HashMap<String, String>, AuthError> + Send + Sync>;
+pub type AuthorizeFn =
+    Arc<dyn Fn(&HeaderMap, &Uri) -> Result<HashMap<String, String>, AuthError> + Send + Sync>;
 
 /// Axum shared state container for the WebSocket handler.
 #[derive(Clone)]
@@ -269,7 +270,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                 }
                 ws::Message::Close(_) => break,
                 ws::Message::Ping(_) | ws::Message::Pong(_) => {
-                    let elapsed = tokio::time::Instant::now().duration_since(start_instant).as_millis() as u64;
+                    let elapsed = tokio::time::Instant::now()
+                        .duration_since(start_instant)
+                        .as_millis() as u64;
                     last_activity_reader.store(elapsed, Ordering::Relaxed);
                 }
                 _ => {}

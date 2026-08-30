@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use roomer::{Conn, Hub, InMemoryMetrics, Message};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -7,7 +7,13 @@ use tokio::sync::mpsc;
 fn bench_message_encode_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("message_framing");
     let payload = Bytes::from(vec![42u8; 1024]);
-    let msg = Message::new("room_alpha", "chat_message", "user_dst", "user_src", payload);
+    let msg = Message::new(
+        "room_alpha",
+        "chat_message",
+        "user_dst",
+        "user_src",
+        payload,
+    );
     let raw = msg.encode();
 
     group.throughput(Throughput::Bytes(raw.len() as u64));
