@@ -1,0 +1,44 @@
+services:
+  redis:
+    image: redis:alpine
+    container_name: roomer-node-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  node1:
+    build:
+      context: ../..
+      dockerfile: server/node/Dockerfile
+    container_name: roomer-node-node1
+    environment:
+      - "PORT=8080"
+      - "REDIS_ADDR=redis:6379"
+      - "REDIS_PREFIX=roomer:demo:"
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  node2:
+    build:
+      context: ../..
+      dockerfile: server/node/Dockerfile
+    container_name: roomer-node-node2
+    environment:
+      - "PORT=8081"
+      - "REDIS_ADDR=redis:6379"
+      - "REDIS_PREFIX=roomer:demo:"
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped

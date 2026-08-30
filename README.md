@@ -4,6 +4,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6?style=flat&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev/)
 [![Rust](https://img.shields.io/badge/Rust-1.88+_(2024)-DEA584?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-24+-339933?style=flat&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![WebSocket](https://img.shields.io/badge/WebSocket-Binary%20Framing-010101?style=flat&logo=socketdotio&logoColor=white)](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
 [![Formal Verification: TLA+](https://img.shields.io/badge/Formal%20Verification-TLA%2B-555555?style=flat)](./spec/roomer.tla)
 [![Client Dependencies: 0](https://img.shields.io/badge/Client%20Deps-0-brightgreen.svg)]()
@@ -20,6 +21,7 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 | **`client/`** | Zero-dependency JavaScript / TypeScript client (`roomer.js`, `bytecursor.js`, `emitter.js`). Provides Crockfordian functional encapsulation, binary framing, and exponential reconnection. |
 | **`server/go/`** | Production Go server implementation (Go 1.26+, 32-shard FNV-1a lock striping, configurable backpressure, Redis adapter). |
 | **`server/rust/`** | Production Rust server implementation (Rust 1.88+ / Edition 2024, Axum 0.8, Tokio, `DashMap` concurrency, zero-copy `bytes::Bytes` framing). |
+| **`server/node/`** | Production Node.js server implementation (Node 24+, Crockfordian functional encapsulation, single-allocation binary framing, Redis adapter). |
 | **`spec/`** | Formal TLA+ specification (`roomer.tla`, `roomer.cfg`) verifying safety invariants and room membership state machines. |
 | **`examples/`** | Unified cross-platform HTML/JS frontend demonstration and interactive room client. |
 | **`tests/`** | Automated browser-based test suite verifying packet encoding, event emission, exception filtering, and teardown. |
@@ -29,12 +31,12 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 ## ⚡ Key Architectural Features
 
 - **Zero-Copy Binary Wire Framing**: Every packet is packed into 5 big-endian, length-prefixed fields with only 20 bytes of header overhead.
-- **Dual Server Parity**: Go and Rust implementations share the exact binary wire protocol, Redis envelope format, and loopback suppression contract.
+- **Triple Server Parity**: Go, Rust, and Node.js implementations share the exact binary wire protocol, Redis envelope format, and loopback suppression contract.
 - **Horizontal Scaling with $O(1)$ Unicast Routing**: Cluster nodes publish broadcasts to room channels while routing direct point-to-point messages directly to the target host node.
 - **Cluster-Wide Presence Synchronization**: Distributed presence sets guarantee `join_ack` snapshots return every active room member across all nodes in the cluster.
 - **Configurable Backpressure Policies**: Supports `DropSlowClient` (default memory protection), `DropOldest` (queue eviction), and `DropNewest` buffer management.
 - **Formally Verified (TLA+)**: Proven state invariants prevent disconnected zombie members and buffer leaks.
-- **Ultra-High Throughput**: Capable of delivering **>1.4 million messages/second** in clustered deployments and completing 1,000-connection broadcasts in **sub-0.2 milliseconds**.
+- **Ultra-High Throughput**: Capable of delivering **>1.4 million messages/second** in Go/Rust and **>320,000 messages/second** in Node.js clustered deployments with sub-millisecond fanout latency.
 
 ---
 
@@ -166,6 +168,7 @@ root.on("open", () => {
 |---|---|---|---|
 | **Go** | [`server/go/README.md`](./server/go/README.md) | Go 1.26, 32-Shard FNV-1a Lock Striping, Channels | `go-redis/v9` UniversalClient |
 | **Rust** | [`server/rust/README.md`](./server/rust/README.md) | Rust 1.88 (2024), Axum 0.8, Tokio, `DashMap` | `redis 0.27` Tokio Connection Multiplexer |
+| **Node.js** | [`server/node/README.md`](./server/node/README.md) | Node 24+, Functional Closures, `ws`, Libuv Stream Backpressure | `ioredis 5.4` Pub/Sub & Presence Registry |
 
 ---
 
@@ -173,10 +176,12 @@ root.on("open", () => {
 
 ### 1. Browser Test Suite & Interactive Demo
 ```bash
-# Start either server:
+# Start any server:
 go run ./server/go/examples/main.go
 # OR
 cargo run --manifest-path server/rust/Cargo.toml --example server
+# OR
+cd server/node && npm start
 ```
 - **Interactive Chat Demo:** [http://localhost:8080/](http://localhost:8080/)
 - **Automated Browser Test Suite:** [http://localhost:8080/tests/](http://localhost:8080/tests/)
@@ -184,6 +189,8 @@ cargo run --manifest-path server/rust/Cargo.toml --example server
 ### 2. Multi-Node Cluster Load Testing
 ```bash
 # Start 2-node cluster with Redis
+docker compose -f server/node/docker-compose.yml up --build -d
+# OR
 docker compose -f server/rust/docker-compose.yml up --build -d
 # OR
 docker compose -f server/go/docker-compose.yml up --build -d
@@ -192,7 +199,7 @@ docker compose -f server/go/docker-compose.yml up --build -d
 go run ./server/go/cmd/loadtest/main.go -node1=ws://localhost:8080/ws -node2=ws://localhost:8081/ws
 
 # Tear down cluster
-docker compose -f server/rust/docker-compose.yml down
+docker compose -f server/node/docker-compose.yml down
 ```
 
 ### 3. Unit, Race Detector & Benchmark Commands
@@ -204,6 +211,9 @@ go test -bench=. -benchmem ./server/go/...
 # Rust unit tests, proptest fuzzing, and Criterion benchmarks
 cargo test --manifest-path server/rust/Cargo.toml --all-targets --features redis-adapter
 cargo bench --manifest-path server/rust/Cargo.toml --features redis-adapter
+
+# Node.js unit and stress tests
+cd server/node && npm test
 ```
 
 ### 4. Formal Verification (TLA+)

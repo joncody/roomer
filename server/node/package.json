@@ -1,0 +1,26 @@
+{
+    "name": "roomer-server",
+    "version": "0.1.0",
+    "description": "High-performance, room-based WebSocket server with binary framing and multi-node clustering for Node.js",
+    "main": "index.js",
+    "types": "index.d.ts",
+    "type": "module",
+    "scripts": {
+        "start": "node examples/main.js",
+        "test": "node --test tests/index.js"
+    },
+    "keywords": [
+        "websocket",
+        "realtime",
+        "rooms",
+        "binary",
+        "redis",
+        "clustering"
+    ],
+    "author": "Jon Cody",
+    "license": "MIT",
+    "dependencies": {
+        "ioredis": "^5.4.2",
+        "ws": "^8.18.0"
+    }
+}
