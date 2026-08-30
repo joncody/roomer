@@ -1,4 +1,4 @@
-import roomer from "/src/roomer.js";
+import roomer from "/client/roomer.js";
 
 const decoder = new TextDecoder("utf-8");
 

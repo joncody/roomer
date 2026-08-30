@@ -67,7 +67,7 @@ func (c *Conn) IsInRoom(room string) bool {
 	return ok
 }
 
-// TrySend attempts to send a binary message; drops it and triggers asynchronous cleanup if send buffer is full.
+// TrySend attempts to send a binary message according to the configured BackpressureStrategy.
 func (c *Conn) TrySend(msg []byte) bool {
 	select {
 	case <-c.done:
@@ -87,15 +87,41 @@ func (c *Conn) TrySend(msg []byte) bool {
 		if c.config.Metrics != nil {
 			c.config.Metrics.OnMessageDropped()
 		}
-		if c.config.Logger != nil {
-			c.config.Logger.Warn("Conn dropped message (buffer full or slow client)", "conn_id", c.ID)
-		}
 
-		// Trigger teardown once asynchronously without spawning duplicate goroutines
-		if atomic.CompareAndSwapInt32(&c.cleaningUp, 0, 1) {
-			go c.cleanup()
+		switch c.config.Backpressure {
+		case DropOldest:
+			select {
+			case <-c.send: // Evict oldest queued message
+			default:
+			}
+			select {
+			case c.send <- msg:
+				if c.config.Metrics != nil {
+					c.config.Metrics.OnMessageSent(len(msg))
+				}
+				return true
+			default:
+				return false
+			}
+
+		case DropNewest:
+			if c.config.Logger != nil {
+				c.config.Logger.Warn("Conn dropped newest frame (buffer saturated)", "conn_id", c.ID)
+			}
+			return false
+
+		case DropSlowClient:
+			fallthrough
+		default:
+			if c.config.Logger != nil {
+				c.config.Logger.Warn("Conn dropped message (buffer full or slow client)", "conn_id", c.ID)
+			}
+			// Trigger teardown once asynchronously without spawning duplicate goroutines
+			if atomic.CompareAndSwapInt32(&c.cleaningUp, 0, 1) {
+				go c.cleanup()
+			}
+			return false
 		}
-		return false
 	}
 }
 
@@ -107,13 +133,13 @@ func (c *Conn) SendToRoom(roomName, event string, payload []byte) {
 	}
 }
 
-// SendToClient sends a direct message to another client by connection ID (routes locally or across cluster).
+// SendToClient sends a direct message to another client by connection ID using targeted unicast routing.
 func (c *Conn) SendToClient(dstID, event string, payload []byte) {
 	msg := NewMessage("root", event, dstID, c.ID, payload)
 	if dst, ok := c.hub.getConn(dstID); ok {
 		dst.TrySend(msg.Bytes())
 	} else {
-		c.hub.publishToCluster("root", msg)
+		c.hub.sendDirectToCluster(dstID, msg)
 	}
 }
 
@@ -132,10 +158,9 @@ func (c *Conn) dispatch(msg *Message) {
 	case "join":
 		c.hub.joinRoom(msg.Room, c)
 		members := []byte("[]")
-		if room, ok := c.hub.getRoom(msg.Room); ok {
-			if snap, err := json.Marshal(room.snapshot()); err == nil {
-				members = snap
-			}
+		snap := c.hub.getClusterPresence(msg.Room)
+		if snapJSON, err := json.Marshal(snap); err == nil {
+			members = snapJSON
 		}
 		ack := NewMessage(msg.Room, "join_ack", "", c.ID, members).Bytes()
 		c.TrySend(ack)
@@ -146,12 +171,12 @@ func (c *Conn) dispatch(msg *Message) {
 		c.TrySend(ack)
 
 	default:
-		// Direct targeted messaging (local or cross-node)
+		// Direct targeted messaging (local or cross-node unicast)
 		if msg.Dst != "" {
 			if dst, ok := c.hub.getConn(msg.Dst); ok {
 				dst.TrySend(msg.Bytes())
 			} else {
-				c.hub.publishToCluster("root", msg)
+				c.hub.sendDirectToCluster(msg.Dst, msg)
 			}
 			return
 		}
@@ -175,7 +200,7 @@ func (c *Conn) dispatch(msg *Message) {
 	}
 }
 
-// cleanup safely removes the connection from all rooms and releases resources.
+// cleanup safely removes the connection from all rooms, unregisters from cluster node registry, and releases resources.
 func (c *Conn) cleanup() {
 	c.cleanupOnce.Do(func() {
 		close(c.done)

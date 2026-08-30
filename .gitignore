@@ -1,0 +1,43 @@
+# Rust / Cargo build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock.backup
+
+# Benchmark reports & profiler output
+/target/criterion/
+*.profdata
+*.profraw
+
+# Temporary / Scratch files
+combined.txt
+*.tmp
+*.temp
+
+# Environment & Log files
+*.log
+.env
+.env.*
+!.env.example
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# Frontend / Node tooling (if used locally)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

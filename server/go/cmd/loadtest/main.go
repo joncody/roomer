@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/joncody/roomer-go"
+	"github.com/joncody/roomer/server/go"
 )
 
 func main() {
 	node1URL := flag.String("node1", "ws://localhost:8080/ws", "WebSocket URL for Node 1")
-	node2URL := flag.String("node2", "ws://localhost:8080/ws", "WebSocket URL for Node 2")
+	node2URL := flag.String("node2", "ws://localhost:8081/ws", "WebSocket URL for Node 2")
 	clientsPerNode := flag.Int("clients", 50, "Number of clients per node")
 	messagesToSend := flag.Int("messages", 1000, "Number of broadcast messages to send")
 	delayMicros := flag.Int("delay", 0, "Delay in microseconds between sent messages (0 = unthrottled burst)")

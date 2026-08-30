@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/joncody/roomer-go"
-	redisadapter "github.com/joncody/roomer-go/adapter/redis"
+	"github.com/joncody/roomer/server/go"
+	redisadapter "github.com/joncody/roomer/server/go/adapter/redis"
 	goredis "github.com/redis/go-redis/v9"
 )
 

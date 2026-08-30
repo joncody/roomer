@@ -423,9 +423,9 @@ function roomer(url, options) {
                     new_message(
                         name,
                         "leave",
-                        member_id,
-                        member_id,
-                        member_id
+                        "",
+                        "",
+                        ""
                     )
                 );
             }
@@ -595,7 +595,7 @@ function roomer(url, options) {
             socket.readyState === WebSocket.OPEN
         ) {
             socket.send(
-                new_message(name, "join", member_id, member_id, member_id)
+                new_message(name, "join", "", "", "")
             );
         }
 

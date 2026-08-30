@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/joncody/roomer-go"
+	"github.com/joncody/roomer/server/go"
 	goredis "github.com/redis/go-redis/v9"
 )
 

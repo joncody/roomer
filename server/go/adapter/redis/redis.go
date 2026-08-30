@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/joncody/roomer-go"
+	"github.com/joncody/roomer/server/go"
 	goredis "github.com/redis/go-redis/v9"
 )
 
 // Ensure Adapter implements roomer.Adapter at compile time.
 var _ roomer.Adapter = (*Adapter)(nil)
 
-// Adapter implements roomer.Adapter using Redis Pub/Sub with loopback suppression and auto-reconnect.
+// Adapter implements roomer.Adapter using Redis Pub/Sub with loopback suppression, presence sets, and unicast routing.
 type Adapter struct {
 	client         goredis.UniversalClient
 	nodeID         string
@@ -40,7 +40,7 @@ type Adapter struct {
 // Option configures the Redis adapter.
 type Option func(*Adapter)
 
-// WithPrefix sets a custom channel prefix in Redis (default: "roomer:").
+// WithPrefix sets a custom channel and key prefix in Redis (default: "roomer:demo:").
 func WithPrefix(prefix string) Option {
 	return func(a *Adapter) {
 		if prefix != "" {
@@ -93,7 +93,7 @@ func New(client goredis.UniversalClient, opts ...Option) (*Adapter, error) {
 		client:         client,
 		nodeID:         nodeUUID,
 		nodeIDBytes:    []byte(nodeUUID),
-		prefix:         "roomer:",
+		prefix:         "roomer:demo:",
 		logger:         slog.Default(),
 		publishTimeout: 5 * time.Second,
 		subCtx:         ctx,
@@ -178,9 +178,75 @@ func (a *Adapter) Publish(ctx context.Context, room string, msg *roomer.Message)
 	return a.client.Publish(pubCtx, channel, envelope).Err()
 }
 
-// Subscribe listens to all room channels matching the prefix (e.g. "roomer:*")
+// PublishDirect sends an enveloped binary message directly to a target cluster node channel.
+func (a *Adapter) PublishDirect(ctx context.Context, targetNodeID string, msg *roomer.Message) error {
+	if msg == nil {
+		return errors.New("cannot publish nil message")
+	}
+	if targetNodeID == "" {
+		return errors.New("target node ID cannot be empty")
+	}
+
+	channel := a.prefix + "node:" + targetNodeID
+	rawMsg := msg.Bytes()
+	envelope := EncodeEnvelope(a.nodeID, rawMsg)
+
+	pubCtx := ctx
+	if pubCtx == nil {
+		pubCtx = context.Background()
+	}
+	if _, hasDeadline := pubCtx.Deadline(); !hasDeadline && a.publishTimeout > 0 {
+		var cancel context.CancelFunc
+		pubCtx, cancel = context.WithTimeout(pubCtx, a.publishTimeout)
+		defer cancel()
+	}
+
+	return a.client.Publish(pubCtx, channel, envelope).Err()
+}
+
+// AddPresence adds a connection ID to a room's cluster-wide presence set.
+func (a *Adapter) AddPresence(ctx context.Context, room, connID string) error {
+	key := a.prefix + "presence:" + room
+	return a.client.SAdd(ctx, key, connID).Err()
+}
+
+// RemovePresence removes a connection ID from a room's cluster-wide presence set.
+func (a *Adapter) RemovePresence(ctx context.Context, room, connID string) error {
+	key := a.prefix + "presence:" + room
+	return a.client.SRem(ctx, key, connID).Err()
+}
+
+// GetPresence retrieves all connection IDs in a room across the entire cluster.
+func (a *Adapter) GetPresence(ctx context.Context, room string) ([]string, error) {
+	key := a.prefix + "presence:" + room
+	return a.client.SMembers(ctx, key).Result()
+}
+
+// RegisterNode maps a connection ID to this node ID with a 24-hour expiration.
+func (a *Adapter) RegisterNode(ctx context.Context, connID string) error {
+	key := a.prefix + "conn_node:" + connID
+	return a.client.Set(ctx, key, a.nodeID, 24*time.Hour).Err()
+}
+
+// UnregisterNode removes a connection ID mapping from the cluster registry.
+func (a *Adapter) UnregisterNode(ctx context.Context, connID string) error {
+	key := a.prefix + "conn_node:" + connID
+	return a.client.Del(ctx, key).Err()
+}
+
+// GetNodeForConn retrieves the node ID hosting a given connection ID.
+func (a *Adapter) GetNodeForConn(ctx context.Context, connID string) (string, error) {
+	key := a.prefix + "conn_node:" + connID
+	val, err := a.client.Get(ctx, key).Result()
+	if err == goredis.Nil {
+		return "", nil
+	}
+	return val, err
+}
+
+// Subscribe listens to all room and node channels matching the prefix (e.g. "roomer:demo:*")
 // with automatic exponential backoff and jittered reconnects.
-func (a *Adapter) Subscribe(handler func(room string, msg *roomer.Message)) error {
+func (a *Adapter) Subscribe(handler func(channel string, msg *roomer.Message)) error {
 	if handler == nil {
 		return errors.New("subscriber handler cannot be nil")
 	}
@@ -214,7 +280,7 @@ func (a *Adapter) Subscribe(handler func(room string, msg *roomer.Message)) erro
 	return nil
 }
 
-func (a *Adapter) listenLoop(handler func(room string, msg *roomer.Message)) {
+func (a *Adapter) listenLoop(handler func(channel string, msg *roomer.Message)) {
 	defer a.subWg.Done()
 	pattern := a.prefix + "*"
 
@@ -304,7 +370,7 @@ func (a *Adapter) listenLoop(handler func(room string, msg *roomer.Message)) {
 	}
 }
 
-func (a *Adapter) handleIncoming(m *goredis.Message, handler func(room string, msg *roomer.Message)) {
+func (a *Adapter) handleIncoming(m *goredis.Message, handler func(channel string, msg *roomer.Message)) {
 	payload := []byte(m.Payload)
 	senderNodeID, rawMsg, ok := DecodeEnvelope(payload)
 	if !ok {
@@ -325,8 +391,8 @@ func (a *Adapter) handleIncoming(m *goredis.Message, handler func(room string, m
 		return
 	}
 
-	roomName := strings.TrimPrefix(m.Channel, a.prefix)
-	handler(roomName, packet)
+	channelSuffix := strings.TrimPrefix(m.Channel, a.prefix)
+	handler(channelSuffix, packet)
 }
 
 // Close unsubscribes from channels and releases resources cleanly.

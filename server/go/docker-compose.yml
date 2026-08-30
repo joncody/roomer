@@ -5,9 +5,16 @@ services:
     ports:
       - "6379:6379"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   node1:
-    build: .
+    build:
+      context: ../..  # This MUST point to the monorepo root
+      dockerfile: server/go/Dockerfile
     container_name: roomer-go-node1
     environment:
       - PORT=8080
@@ -15,11 +22,14 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   node2:
-    build: .
+    build:
+      context: ../..  # This MUST point to the monorepo root
+      dockerfile: server/go/Dockerfile
     container_name: roomer-go-node2
     environment:
       - PORT=8081
@@ -27,5 +37,6 @@ services:
     ports:
       - "8081:8081"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: unless-stopped

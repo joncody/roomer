@@ -3,6 +3,7 @@ package roomer
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,8 +70,18 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 	defer h.cfgMu.Unlock()
 	if adapter != nil {
 		h.adapter = adapter
-		_ = h.adapter.Subscribe(func(roomName string, msg *Message) {
-			// Cross-node direct messaging
+		_ = h.adapter.Subscribe(func(channelSuffix string, msg *Message) {
+			// Targeted node unicast direct messaging: "node:node_UUID"
+			if strings.HasPrefix(channelSuffix, "node:") {
+				if msg.Dst != "" {
+					if dst, ok := h.getConn(msg.Dst); ok {
+						dst.TrySend(msg.Bytes())
+					}
+				}
+				return
+			}
+
+			// Cross-node direct messaging via root broadcast
 			if msg.Dst != "" {
 				if dst, ok := h.getConn(msg.Dst); ok {
 					dst.TrySend(msg.Bytes())
@@ -79,7 +90,7 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 			}
 
 			// Local room fanout
-			if r, ok := h.getRoom(roomName); ok {
+			if r, ok := h.getRoom(channelSuffix); ok {
 				r.emitLocal(msg)
 			}
 		})
@@ -101,24 +112,48 @@ func (h *Hub) getConn(id string) (*Conn, bool) {
 	return c, ok
 }
 
-// addConn adds a new connection to the hub and tracks metrics.
+// addConn adds a new connection to the hub, registers with cluster node registry, and tracks metrics.
 func (h *Hub) addConn(c *Conn) {
 	shard := &h.connShards[getShardIndex(c.ID)]
 	shard.mu.Lock()
 	shard.conns[c.ID] = c
 	shard.mu.Unlock()
+
+	h.cfgMu.RLock()
+	adapter := h.adapter
+	h.cfgMu.RUnlock()
+	if adapter != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = adapter.RegisterNode(ctx, c.ID)
+		}()
+	}
+
 	if h.metrics != nil {
 		h.metrics.OnConnect()
 	}
 }
 
-// removeConn removes a connection from the hub and tracks metrics.
+// removeConn removes a connection from the hub, unregisters from cluster node registry, and tracks metrics.
 func (h *Hub) removeConn(id string) {
 	shard := &h.connShards[getShardIndex(id)]
 	shard.mu.Lock()
 	if _, ok := shard.conns[id]; ok {
 		delete(shard.conns, id)
 		shard.mu.Unlock()
+
+		h.cfgMu.RLock()
+		adapter := h.adapter
+		h.cfgMu.RUnlock()
+		if adapter != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = adapter.UnregisterNode(ctx, id)
+			}()
+		}
+
 		if h.metrics != nil {
 			h.metrics.OnDisconnect()
 		}
@@ -153,7 +188,7 @@ func (h *Hub) removeRoom(r *room) {
 	shard.mu.Unlock()
 }
 
-// joinRoom adds a connection to a room atomically, creating the room if needed.
+// joinRoom adds a connection to a room atomically, tracking cluster presence.
 func (h *Hub) joinRoom(name string, c *Conn) {
 	select {
 	case <-c.done:
@@ -175,13 +210,25 @@ func (h *Hub) joinRoom(name string, c *Conn) {
 	if c.trackRoom(name) {
 		r.addMember(c)
 		shard.mu.Unlock()
+
+		h.cfgMu.RLock()
+		adapter := h.adapter
+		h.cfgMu.RUnlock()
+		if adapter != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = adapter.AddPresence(ctx, name, c.ID)
+			}()
+		}
+
 		r.emit(c, NewMessage(r.Name, "new_member", "", "", []byte(c.ID)))
 		return
 	}
 	shard.mu.Unlock()
 }
 
-// leaveRoom removes a connection from a specific room and cleans up empty rooms.
+// leaveRoom removes a connection from a specific room, cleaning up empty rooms and presence.
 func (h *Hub) leaveRoom(name string, c *Conn) {
 	c.untrackRoom(name)
 	shard := &h.roomShards[getShardIndex(name)]
@@ -196,6 +243,17 @@ func (h *Hub) leaveRoom(name string, c *Conn) {
 		h.removeRoom(r)
 	}
 
+	h.cfgMu.RLock()
+	adapter := h.adapter
+	h.cfgMu.RUnlock()
+	if adapter != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = adapter.RemovePresence(ctx, name, c.ID)
+		}()
+	}
+
 	r.emit(c, NewMessage(r.Name, "member_left", "", "", []byte(c.ID)))
 }
 
@@ -203,6 +261,55 @@ func (h *Hub) leaveRoom(name string, c *Conn) {
 func (h *Hub) leaveAllRooms(c *Conn) {
 	for _, name := range c.joinedRooms() {
 		h.leaveRoom(name, c)
+	}
+}
+
+// getClusterPresence retrieves all member IDs in a room across the entire cluster.
+func (h *Hub) getClusterPresence(roomName string) []string {
+	h.cfgMu.RLock()
+	adapter := h.adapter
+	h.cfgMu.RUnlock()
+
+	if adapter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if members, err := adapter.GetPresence(ctx, roomName); err == nil && len(members) > 0 {
+			return members
+		}
+	}
+
+	if r, ok := h.getRoom(roomName); ok {
+		return r.snapshot()
+	}
+	return []string{}
+}
+
+// sendDirectToCluster routes a direct message using targeted node unicast when target node is known.
+func (h *Hub) sendDirectToCluster(dstID string, msg *Message) {
+	h.cfgMu.RLock()
+	adapter := h.adapter
+	metrics := h.metrics
+	h.cfgMu.RUnlock()
+
+	if adapter != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if targetNode, err := adapter.GetNodeForConn(ctx, dstID); err == nil && targetNode != "" {
+				if err := adapter.PublishDirect(ctx, targetNode, msg); err == nil {
+					if metrics != nil {
+						metrics.OnClusterPublish(len(msg.Payload))
+					}
+					return
+				}
+			}
+			// Fallback to cluster-wide root broadcast if node mapping not resolved
+			if err := adapter.Publish(ctx, "root", msg); err == nil {
+				if metrics != nil {
+					metrics.OnClusterPublish(len(msg.Payload))
+				}
+			}
+		}()
 	}
 }
 

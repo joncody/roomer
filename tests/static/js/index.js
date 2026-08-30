@@ -1,5 +1,5 @@
-import bytecursor from "/src/bytecursor.js";
-import roomer from "/src/roomer.js";
+import bytecursor from "/client/bytecursor.js";
+import roomer from "/client/roomer.js";
 
 function create_test_runner() {
     const results_container = document.getElementById("test-results");

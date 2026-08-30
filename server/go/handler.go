@@ -23,6 +23,18 @@ var ReservedEvents = []string{
 	"close",
 }
 
+// BackpressureStrategy specifies how the server handles outbound buffer saturation.
+type BackpressureStrategy int
+
+const (
+	// DropSlowClient drops the message and initiates asynchronous connection teardown (default).
+	DropSlowClient BackpressureStrategy = iota
+	// DropOldest evicts the oldest queued message in the channel buffer to accommodate new frames.
+	DropOldest
+	// DropNewest discards the incoming frame while preserving the client connection and buffered messages.
+	DropNewest
+)
+
 // Authorize is a function that extracts authenticated claims from an HTTP request.
 type Authorize func(*http.Request) (map[string]string, error)
 
@@ -44,6 +56,7 @@ type Config struct {
 	Logger          *slog.Logger
 	Metrics         Metrics
 	Adapter         Adapter
+	Backpressure    BackpressureStrategy
 }
 
 // Option sets a configuration option for roomer WebSocket handling.
@@ -64,6 +77,7 @@ func DefaultConfig() Config {
 		Logger:          slog.Default(),
 		Metrics:         NopMetrics{},
 		Adapter:         newLocalAdapter(),
+		Backpressure:    DropSlowClient,
 	}
 }
 
@@ -177,6 +191,13 @@ func WithAdapter(adapter Adapter) Option {
 	}
 }
 
+// WithBackpressureStrategy sets the buffer saturation backpressure policy.
+func WithBackpressureStrategy(strategy BackpressureStrategy) Option {
+	return func(c *Config) {
+		c.Backpressure = strategy
+	}
+}
+
 var (
 	messageHandlersMu sync.RWMutex
 	messageHandlers   = make(map[string]MessageHandler)
@@ -278,12 +299,11 @@ func SocketHandlerWithOptions(opts ...Option) http.HandlerFunc {
 		hub.addConn(c)
 		hub.joinRoom("root", c)
 
-		// Send join_ack for default "root" room
+		// Send join_ack for default "root" room using cluster-wide presence snapshot
 		members := []byte("[]")
-		if room, ok := hub.getRoom("root"); ok {
-			if snap, err := json.Marshal(room.snapshot()); err == nil {
-				members = snap
-			}
+		snap := hub.getClusterPresence("root")
+		if snapJSON, err := json.Marshal(snap); err == nil {
+			members = snapJSON
 		}
 		ack := NewMessage("root", "join_ack", "", c.ID, members).Bytes()
 		if !c.TrySend(ack) {

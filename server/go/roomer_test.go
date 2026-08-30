@@ -107,7 +107,66 @@ func TestRegisterHandler_ReservedAndDuplicateGuards(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 3. Concurrency, Race Condition & Metrics Tests
+// 3. Backpressure Policy Tests
+// -----------------------------------------------------------------------------
+
+func TestConn_BackpressureStrategies(t *testing.T) {
+	// 1. DropOldest strategy
+	cfgOldest := DefaultConfig()
+	cfgOldest.Backpressure = DropOldest
+	cfgOldest.ChannelCapacity = 2
+
+	cOldest := &Conn{
+		ID:     "conn_oldest",
+		send:   make(chan []byte, 2),
+		done:   make(chan struct{}),
+		config: cfgOldest,
+	}
+
+	cOldest.TrySend([]byte("msg_1"))
+	cOldest.TrySend([]byte("msg_2"))
+	// Queue is full; sending msg_3 should evict msg_1
+	cOldest.TrySend([]byte("msg_3"))
+
+	firstOut := <-cOldest.send
+	if string(firstOut) != "msg_2" {
+		t.Errorf("expected msg_2 after oldest eviction, got %s", string(firstOut))
+	}
+	secondOut := <-cOldest.send
+	if string(secondOut) != "msg_3" {
+		t.Errorf("expected msg_3, got %s", string(secondOut))
+	}
+
+	// 2. DropNewest strategy
+	cfgNewest := DefaultConfig()
+	cfgNewest.Backpressure = DropNewest
+	cfgNewest.ChannelCapacity = 2
+
+	cNewest := &Conn{
+		ID:     "conn_newest",
+		send:   make(chan []byte, 2),
+		done:   make(chan struct{}),
+		config: cfgNewest,
+	}
+
+	cNewest.TrySend([]byte("msg_A"))
+	cNewest.TrySend([]byte("msg_B"))
+	// Queue is full; sending msg_C should be dropped while preserving msg_A and msg_B
+	success := cNewest.TrySend([]byte("msg_C"))
+	if success {
+		t.Errorf("expected TrySend to return false for dropped newest message")
+	}
+
+	if string(<-cNewest.send) != "msg_A" {
+		t.Errorf("expected msg_A to remain in queue")
+	}
+	if string(<-cNewest.send) != "msg_B" {
+		t.Errorf("expected msg_B to remain in queue")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 4. Concurrency, Race Condition & Metrics Tests
 // -----------------------------------------------------------------------------
 
 func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
@@ -201,7 +260,7 @@ func TestHub_GracefulShutdown(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 4. Benchmarks
+// 5. Benchmarks
 // -----------------------------------------------------------------------------
 
 func BenchmarkMessage_Bytes(b *testing.B) {
