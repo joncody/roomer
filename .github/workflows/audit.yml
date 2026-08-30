@@ -20,6 +20,5 @@ jobs:
       - name: Run Cargo Deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
           manifest-path: server/rust/Cargo.toml
-          command-arguments: --config server/rust/deny.toml
+          arguments: --config server/rust/deny.toml --all-features
