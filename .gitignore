@@ -1,43 +1,62 @@
-# Rust / Cargo build artifacts
-/target/
+# Rust build artifacts
+target/
+**/target/
 **/*.rs.bk
-Cargo.lock.backup
+*.rlib
 
-# Benchmark reports & profiler output
-/target/criterion/
-*.profdata
-*.profraw
+# Go build artifacts & binaries
+server_bin
+/app/server_bin
+bin/
+**/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
 
-# Temporary / Scratch files
-combined.txt
-*.tmp
-*.temp
+# Node / Web / Package managers (if any tooling is added)
+node_modules/
+dist/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# Environment & Log files
-*.log
-.env
-.env.*
-!.env.example
-
-# IDE / Editor configuration
+# IDEs and Text Editors
 .vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
 .idea/
 *.iml
+*.sublime-workspace
+*.sublime-project
 *.swp
 *.swo
 *~
 
-# Operating System files
+# Operating System Files
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-Thumbs.db
 ehthumbs.db
+Thumbs.db
 
-# Frontend / Node tooling (if used locally)
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# Environment variables & local overrides
+.env
+.env.local
+.env.*.local
+docker-compose.override.yml
+
+# TLA+ Model Checker (TLC) generated artifacts
+spec/states/
+MC.*
+*.tla.dump
