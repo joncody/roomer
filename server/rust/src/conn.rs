@@ -6,7 +6,6 @@ use dashmap::DashSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Backpressure policy when outbound connection queue is saturated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -87,14 +86,13 @@ impl Conn {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.metrics.on_message_dropped();
                 match self.backpressure {
-                    BackpressureStrategy::DropNewest => {
-                        warn!(conn_id = %self.id, "Dropped newest frame: outbound channel full");
+                    BackpressureStrategy::DropSlowClient => {
+                        let _ = self
+                            .send_tx
+                            .try_send(OutboundMessage::Close(1008, "Slow client dropped".into()));
                         false
                     }
-                    BackpressureStrategy::DropOldest | BackpressureStrategy::DropSlowClient => {
-                        warn!(conn_id = %self.id, "Dropped message: outbound channel buffer full");
-                        false
-                    }
+                    BackpressureStrategy::DropOldest | BackpressureStrategy::DropNewest => false,
                 }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => false,

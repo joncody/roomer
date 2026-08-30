@@ -128,6 +128,7 @@ func main() {
 	// 5. Mount WebSocket handler
 	opts := []roomer.Option{
 		roomer.WithLogger(logger),
+        roomer.WithChannelCapacity(8192),
 	}
 	if adapter != nil {
 		opts = append(opts, roomer.WithAdapter(adapter))

@@ -72,28 +72,22 @@ impl Hub {
         let rooms = Arc::clone(&self.rooms);
         let conns = Arc::clone(&self.conns);
         let _ = adapter
-            .subscribe(Arc::new(move |channel_suffix, msg| {
-                // Targeted unicast direct messaging: "node:node_UUID"
-                if channel_suffix.starts_with("node:") {
-                    if !msg.dst.is_empty() {
-                        if let Some(dst_conn) = conns.get(&msg.dst) {
-                            dst_conn.try_send(msg.encode());
+            .subscribe(Arc::new(move |channel_suffix, _sender_node, raw_frame| {
+                // Targeted unicast direct messaging: "node:node_UUID" or "root"
+                if channel_suffix.starts_with("node:") || channel_suffix == "root" {
+                    if let Some(packet) = Message::decode(raw_frame.clone()) {
+                        if !packet.dst.is_empty() {
+                            if let Some(dst_conn) = conns.get(&packet.dst) {
+                                dst_conn.try_send(raw_frame);
+                            }
+                            return;
                         }
                     }
-                    return;
                 }
 
-                // Cross-node direct messaging via root broadcast
-                if !msg.dst.is_empty() {
-                    if let Some(dst_conn) = conns.get(&msg.dst) {
-                        dst_conn.try_send(msg.encode());
-                    }
-                    return;
-                }
-
+                // Zero-copy local room fanout directly using raw wire Bytes
                 if let Some(room) = rooms.get(channel_suffix) {
-                    let encoded = msg.encode();
-                    room.emit_local(Some(&msg.src), encoded);
+                    room.emit_local(None, raw_frame);
                 }
             }))
             .await;
@@ -192,9 +186,8 @@ impl Hub {
     pub fn leave_room(&self, name: &str, conn: &Arc<Conn>) {
         conn.untrack_room(name);
         if let Some(room) = self.get_room(name) {
-            let is_empty = room.remove_member(&conn.id);
-            if is_empty {
-                self.rooms.remove(name);
+            room.remove_member(&conn.id);
+            if self.rooms.remove_if(name, |_, r| r.is_empty()).is_some() {
                 self.metrics().on_room_deleted(name);
             }
 
@@ -235,16 +228,17 @@ impl Hub {
     pub fn send_direct_to_cluster(&self, msg: Message) {
         let adapter_lock = self.adapter.clone();
         let dst_id_str = msg.dst.clone();
+        let encoded = msg.encode();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let adapter = adapter_lock.read().await;
                 if let Ok(Some(target_node)) = adapter.get_node_for_conn(&dst_id_str).await {
-                    if adapter.publish_direct(&target_node, &msg).await.is_ok() {
+                    if adapter.publish_direct_raw(&target_node, &encoded).await.is_ok() {
                         return;
                     }
                 }
                 // Fallback to cluster broadcast on root channel
-                let _ = adapter.publish("root", &msg).await;
+                let _ = adapter.publish_raw("root", &encoded).await;
             });
         }
     }
@@ -253,16 +247,16 @@ impl Hub {
     pub fn broadcast_room(&self, exclude_id: Option<&str>, msg: Message) {
         let encoded = msg.encode();
         if let Some(room) = self.get_room(&msg.room) {
-            room.emit_local(exclude_id, encoded);
+            room.emit_local(exclude_id, encoded.clone());
         }
 
         let adapter_lock = self.adapter.clone();
-        let room_str = msg.room.clone();
+        let room_str = msg.room;
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let adapter = adapter_lock.read().await;
-                if let Err(err) = adapter.publish(&room_str, &msg).await {
+                if let Err(err) = adapter.publish_raw(&room_str, &encoded).await {
                     error!(room = %room_str, error = %err, "Failed to publish message to cluster adapter");
                 }
             });

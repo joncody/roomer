@@ -3,20 +3,31 @@
 use crate::error::AdapterError;
 use crate::message::Message;
 use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
 use std::sync::Arc;
 
-/// Callback type signature for cluster subscription listeners.
-pub type SubscribeCallback = Arc<dyn Fn(&str, Message) + Send + Sync + 'static>;
+/// Callback type signature for cluster subscription listeners: `(channel_suffix, sender_node_id, raw_frame)`.
+pub type SubscribeCallback = Arc<dyn Fn(&str, &str, Bytes) + Send + Sync + 'static>;
 
 /// Trait defining horizontal scaling message broadcast and cluster presence adapters.
 #[async_trait]
 pub trait Adapter: Send + Sync + 'static {
     /// Publishes a message to all cluster nodes for a specified room.
-    async fn publish(&self, room: &str, msg: &Message) -> Result<(), AdapterError>;
+    async fn publish(&self, room: &str, msg: &Message) -> Result<(), AdapterError> {
+        self.publish_raw(room, &msg.encode()).await
+    }
+
+    /// Publishes a raw binary message frame directly to all cluster nodes for a specified room.
+    async fn publish_raw(&self, room: &str, raw_msg: &[u8]) -> Result<(), AdapterError>;
 
     /// Publishes a message directly to a specific target cluster node (unicast).
-    async fn publish_direct(&self, target_node_id: &str, msg: &Message) -> Result<(), AdapterError>;
+    async fn publish_direct(&self, target_node_id: &str, msg: &Message) -> Result<(), AdapterError> {
+        self.publish_direct_raw(target_node_id, &msg.encode()).await
+    }
+
+    /// Publishes a raw binary message frame directly to a specific target cluster node (unicast).
+    async fn publish_direct_raw(&self, target_node_id: &str, raw_msg: &[u8]) -> Result<(), AdapterError>;
 
     /// Subscribes to cluster messages and invokes the given callback.
     async fn subscribe(&self, callback: SubscribeCallback) -> Result<(), AdapterError>;
@@ -58,7 +69,13 @@ impl Adapter for LocalAdapter {
     async fn publish(&self, _room: &str, _msg: &Message) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn publish_raw(&self, _room: &str, _raw_msg: &[u8]) -> Result<(), AdapterError> {
+        Ok(())
+    }
     async fn publish_direct(&self, _target_node_id: &str, _msg: &Message) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn publish_direct_raw(&self, _target_node_id: &str, _raw_msg: &[u8]) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn subscribe(&self, _callback: SubscribeCallback) -> Result<(), AdapterError> {
@@ -116,7 +133,7 @@ pub mod redis {
     use futures_util::StreamExt;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::{oneshot, Mutex};
+    use tokio::sync::{oneshot, RwLock};
     use tracing::{error, info, warn};
     use uuid::Uuid;
 
@@ -180,8 +197,8 @@ pub mod redis {
                 node_id,
                 prefix: self.prefix,
                 publish_timeout: self.publish_timeout,
-                multiplexed_conn: Arc::new(Mutex::new(None)),
-                shutdown_tx: Mutex::new(None),
+                multiplexed_conn: Arc::new(RwLock::new(None)),
+                shutdown_tx: tokio::sync::Mutex::new(None),
             })
         }
     }
@@ -192,8 +209,8 @@ pub mod redis {
         node_id: String,
         prefix: String,
         publish_timeout: Duration,
-        multiplexed_conn: Arc<Mutex<Option<::redis::aio::MultiplexedConnection>>>,
-        shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+        multiplexed_conn: Arc<RwLock<Option<::redis::aio::MultiplexedConnection>>>,
+        shutdown_tx: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
     }
 
     impl RedisAdapter {
@@ -215,7 +232,13 @@ pub mod redis {
         }
 
         async fn get_publish_conn(&self) -> Result<::redis::aio::MultiplexedConnection, AdapterError> {
-            let mut guard = self.multiplexed_conn.lock().await;
+            {
+                let guard = self.multiplexed_conn.read().await;
+                if let Some(ref conn) = *guard {
+                    return Ok(conn.clone());
+                }
+            }
+            let mut guard = self.multiplexed_conn.write().await;
             if let Some(ref conn) = *guard {
                 Ok(conn.clone())
             } else {
@@ -261,47 +284,47 @@ pub mod redis {
         }
 
         async fn publish(&self, room: &str, msg: &Message) -> Result<(), AdapterError> {
+            self.publish_raw(room, &msg.encode()).await
+        }
+
+        async fn publish_raw(&self, room: &str, raw_msg: &[u8]) -> Result<(), AdapterError> {
             let mut conn = self.get_publish_conn().await?;
             let channel = format!("{}{}", self.prefix, room);
-            let raw_msg = msg.encode();
-            let payload = Self::encode_envelope(&self.node_id, &raw_msg);
+            let payload = Self::encode_envelope(&self.node_id, raw_msg);
 
-            let _receivers: i64 = tokio::time::timeout(self.publish_timeout, async {
-                ::redis::cmd("PUBLISH")
-                    .arg(&channel)
-                    .arg(payload.as_ref())
-                    .query_async(&mut conn)
-                    .await
-            })
-            .await
-            .map_err(|_| AdapterError::PublishTimeout)?
-            .map_err(|e| {
-                error!(error = %e, channel = %channel, "Redis PUBLISH command failed");
-                AdapterError::PublishFailed(e.to_string())
-            })?;
+            let mut cmd = ::redis::cmd("PUBLISH");
+            cmd.arg(&channel).arg(payload.as_ref());
+
+            tokio::time::timeout(self.publish_timeout, cmd.query_async::<i64>(&mut conn))
+                .await
+                .map_err(|_| AdapterError::PublishTimeout)?
+                .map_err(|e| {
+                    error!(error = %e, channel = %channel, "Redis PUBLISH command failed");
+                    AdapterError::PublishFailed(e.to_string())
+                })?;
 
             Ok(())
         }
 
         async fn publish_direct(&self, target_node_id: &str, msg: &Message) -> Result<(), AdapterError> {
+            self.publish_direct_raw(target_node_id, &msg.encode()).await
+        }
+
+        async fn publish_direct_raw(&self, target_node_id: &str, raw_msg: &[u8]) -> Result<(), AdapterError> {
             let mut conn = self.get_publish_conn().await?;
             let channel = format!("{}node:{}", self.prefix, target_node_id);
-            let raw_msg = msg.encode();
-            let payload = Self::encode_envelope(&self.node_id, &raw_msg);
+            let payload = Self::encode_envelope(&self.node_id, raw_msg);
 
-            let _receivers: i64 = tokio::time::timeout(self.publish_timeout, async {
-                ::redis::cmd("PUBLISH")
-                    .arg(&channel)
-                    .arg(payload.as_ref())
-                    .query_async(&mut conn)
-                    .await
-            })
-            .await
-            .map_err(|_| AdapterError::PublishTimeout)?
-            .map_err(|e| {
-                error!(error = %e, channel = %channel, "Redis unicast PUBLISH failed");
-                AdapterError::PublishFailed(e.to_string())
-            })?;
+            let mut cmd = ::redis::cmd("PUBLISH");
+            cmd.arg(&channel).arg(payload.as_ref());
+
+            tokio::time::timeout(self.publish_timeout, cmd.query_async::<i64>(&mut conn))
+                .await
+                .map_err(|_| AdapterError::PublishTimeout)?
+                .map_err(|e| {
+                    error!(error = %e, channel = %channel, "Redis unicast PUBLISH failed");
+                    AdapterError::PublishFailed(e.to_string())
+                })?;
 
             Ok(())
         }
@@ -417,11 +440,9 @@ pub mod redis {
                                                 continue;
                                             }
 
-                                            if let Some(packet) = Message::decode(raw_data) {
-                                                let channel_name = msg.get_channel_name();
-                                                let channel_suffix = channel_name.strip_prefix(&prefix).unwrap_or(channel_name);
-                                                callback(channel_suffix, packet);
-                                            }
+                                            let channel_name = msg.get_channel_name();
+                                            let channel_suffix = channel_name.strip_prefix(&prefix).unwrap_or(channel_name);
+                                            callback(channel_suffix, &sender_node, raw_data);
                                         }
                                     }
                                     None => {

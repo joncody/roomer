@@ -54,7 +54,7 @@ mod redis_tests {
 
         let b_counter = node_b_received.clone();
         node_b
-            .subscribe(Arc::new(move |_room, _msg| {
+            .subscribe(Arc::new(move |_room, _sender, _raw| {
                 b_counter.fetch_add(1, Ordering::SeqCst);
             }))
             .await
@@ -62,7 +62,7 @@ mod redis_tests {
 
         let a_counter = node_a_received.clone();
         node_a
-            .subscribe(Arc::new(move |_room, _msg| {
+            .subscribe(Arc::new(move |_room, _sender, _raw| {
                 a_counter.fetch_add(1, Ordering::SeqCst);
             }))
             .await

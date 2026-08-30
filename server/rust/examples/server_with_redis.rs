@@ -54,19 +54,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     hub.configure(Arc::new(adapter), metrics.clone()).await;
     info!("Multi-node Redis cluster adapter configured successfully");
 
-    // 2. Register custom "chat" handler
+    // 2. Register custom "chat" handler (zero-overhead broadcast)
     let hub_chat = hub.clone();
     hub.register_handler(
         "chat",
         Arc::new(move |conn, msg| {
             let hub = hub_chat.clone();
             Box::pin(async move {
-                info!(
-                    room = %msg.room,
-                    sender = %msg.src,
-                    bytes = msg.payload.len(),
-                    "Chat message received"
-                );
                 hub.broadcast_room(Some(&conn.id), msg);
                 Ok(())
             })
@@ -89,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(hub.clone()).with_config(
         ServerConfig::default()
             .with_max_message_size(16 * 1024 * 1024)
-            .with_channel_capacity(2048),
+            .with_channel_capacity(8192),
     );
 
     // Resolve static asset paths dynamically across root, subfolder, and container execution

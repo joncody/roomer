@@ -50,3 +50,10 @@ harness = false
 name = "server_with_redis"
 path = "examples/server_with_redis.rs"
 required-features = ["redis-adapter"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

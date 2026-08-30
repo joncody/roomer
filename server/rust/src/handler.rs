@@ -179,7 +179,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
     let last_activity_writer = last_activity_ms.clone();
     let conn_id_writer = conn.id.clone();
 
-    // Axum 0.8.9 zero-copy writer loop with active heartbeat tracking
+    // High-performance coalescing WebSocket writer loop with biased branch priority
     let writer_task = tokio::spawn(async move {
         let check_interval = Duration::from_secs(1).min(ping_interval);
         let mut ticker = tokio::time::interval(check_interval);
@@ -187,20 +187,44 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
 
         loop {
             tokio::select! {
+                biased;
+
                 Some(outbound) = send_rx.recv() => {
-                    match outbound {
-                        OutboundMessage::Binary(msg_bytes) => {
-                            if ws_sender.send(ws::Message::Binary(msg_bytes)).await.is_err() {
-                                break;
+                    let mut current = outbound;
+                    let mut count = 0;
+
+                    loop {
+                        match current {
+                            OutboundMessage::Binary(msg_bytes) => {
+                                // Feed into buffer without triggering immediate TCP flush syscall
+                                if ws_sender.feed(ws::Message::Binary(msg_bytes)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            OutboundMessage::Close(code, reason) => {
+                                let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
+                                    code,
+                                    reason: reason.into(),
+                                }))).await;
+                                return;
                             }
                         }
-                        OutboundMessage::Close(code, reason) => {
-                            let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
-                                code,
-                                reason: reason.into(),
-                            }))).await;
+
+                        count += 1;
+                        if count >= 128 {
                             break;
                         }
+
+                        // Opportunistically batch queued burst frames before flushing TCP socket
+                        match send_rx.try_recv() {
+                            Ok(next_msg) => current = next_msg,
+                            Err(_) => break,
+                        }
+                    }
+
+                    // Single coalesced TCP flush for the entire batch
+                    if ws_sender.flush().await.is_err() {
+                        return;
                     }
                 }
                 _ = ticker.tick() => {
@@ -209,18 +233,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                     let elapsed_since_act = now.duration_since(start_instant + Duration::from_millis(last_act));
 
                     if elapsed_since_act > pong_timeout {
-                        warn!(conn_id = %conn_id_writer, "Connection heartbeat timed out (no activity/pong received)");
+                        warn!(conn_id = %conn_id_writer, "Connection heartbeat timed out");
                         let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
                             code: 1000,
                             reason: "Heartbeat timeout".into(),
                         }))).await;
-                        break;
+                        return;
                     }
 
                     if now.duration_since(last_ping) >= ping_interval {
                         last_ping = now;
                         if ws_sender.send(ws::Message::Ping(Bytes::new())).await.is_err() {
-                            break;
+                            return;
                         }
                     }
                 }
@@ -236,9 +260,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
 
     let reader_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
-            let elapsed = tokio::time::Instant::now().duration_since(start_instant).as_millis() as u64;
-            last_activity_reader.store(elapsed, Ordering::Relaxed);
-
             match msg {
                 ws::Message::Binary(bin) => {
                     conn_for_reader.metrics.on_message_received(bin.len());
@@ -247,7 +268,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                     }
                 }
                 ws::Message::Close(_) => break,
-                ws::Message::Ping(_) | ws::Message::Pong(_) => {}
+                ws::Message::Ping(_) | ws::Message::Pong(_) => {
+                    let elapsed = tokio::time::Instant::now().duration_since(start_instant).as_millis() as u64;
+                    last_activity_reader.store(elapsed, Ordering::Relaxed);
+                }
                 _ => {}
             }
         }
