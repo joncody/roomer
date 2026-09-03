@@ -245,6 +245,7 @@ Factory function creating an asynchronous context manager.
 | `room.off(event, listener)` | `None` | Unsubscribes a registered listener callback. |
 | `room.clear_listeners(exceptions=None)` | `Room` | Clears custom listeners except those listed in `exceptions`. |
 | `room.force_close(is_disconnect=False)` | `Room` | Clears local member state and emits `"close"`. |
+| `root.close()` *(root only)* | `Coroutine` | Gracefully closes all rooms and the WebSocket connection. |
 | `root.purge()` *(root only)* | `Room` | Unsubscribes from all non-root rooms simultaneously. |
 | `root.rooms()` *(root only)* | `dict[str, Room]` | Dictionary mapping of all active room handles. |
 

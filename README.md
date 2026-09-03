@@ -134,6 +134,9 @@ root.on("open", () => {
         console.log(`[${senderId}]: ${text}`);
     });
 });
+
+// Explicitly close all rooms and disconnect
+// root.close();
 ```
 
 ---
@@ -179,6 +182,7 @@ if __name__ == "__main__":
 | `.send(event, payload?, dst?)` | `.send(event, payload=None, dst="")` | Sends a message packet (broadcast to room, or direct to `dst`). |
 | `.clearListeners([exceptions])`| `.clear_listeners(exceptions=None)` | Clears registered listeners except those listed in `exceptions`. |
 | `.forceClose(isDisconnect?)` | `.force_close(is_disconnect=False)` | Closes room state locally and emits `"close"`. |
+| `.close()` *(root only)* | `.close()` *(root only)* | Explicitly tears down the WebSocket connection and closes all active rooms. |
 | `.purge()` *(root only)* | `.purge()` *(root only)* | Leaves all non-root rooms simultaneously. |
 | `.rooms()` *(root only)* | `.rooms()` *(root only)* | Read-only map/dict of all active room instances. |
 

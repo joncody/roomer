@@ -445,8 +445,12 @@ class RoomerClient:
             def rooms_map() -> dict[str, Room]:
                 return dict(self._rooms)
 
+            async def close() -> None:
+                await self.close()
+
             setattr(room, "purge", purge)
             setattr(room, "rooms", rooms_map)
+            setattr(room, "close", close)
 
         self._rooms[name] = room
 

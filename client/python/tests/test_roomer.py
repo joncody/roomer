@@ -6,7 +6,7 @@ room state machines, and async mock transports.
 
 import json
 import pytest
-from roomer import Packet, Room, decode_message, encode_message, EventEmitter, roomer
+from roomer import Packet, Room, RoomerClient, decode_message, encode_message, EventEmitter, roomer
 
 
 # ------------------------------------------------------------------------------
@@ -186,3 +186,14 @@ def test_reserved_event_guard():
 
     with pytest.raises(ValueError, match="Cannot send reserved event"):
         root.send("leave_ack", "invalid")
+
+
+def test_root_room_special_methods():
+    client = RoomerClient("ws://localhost:8080/ws", reconnect=False)
+    root = client.root
+    assert hasattr(root, "close")
+    assert hasattr(root, "purge")
+    assert hasattr(root, "rooms")
+    assert callable(getattr(root, "close"))
+    assert callable(getattr(root, "purge"))
+    assert callable(getattr(root, "rooms"))

@@ -175,6 +175,8 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
  *     The room channel name.
  * @property {(exceptions?: string[]) => Room} clearListeners
  *     Removes registered event listeners except those in exceptions.
+ * @property {() => Room} [close]
+ *     Explicitly closes the WebSocket connection and all active rooms (root only).
  * @property {(is_disconnect?: boolean) => Room} forceClose
  *     Forces the room to close locally and clears member state.
  * @property {() => string} id
@@ -236,17 +238,69 @@ function roomer(url, options) {
     let socket;
     let manual_close = false;
     let reconnect_delay = opts.initial_delay;
+    let reconnect_timer = null;
+
+    /**
+     * Clears any active reconnection timer.
+     * @returns {void}
+     */
+    function clear_reconnect_timer() {
+        if (reconnect_timer !== null) {
+            clearTimeout(reconnect_timer);
+            reconnect_timer = null;
+        }
+    }
+
+    /**
+     * Schedules an exponential backoff reconnection attempt.
+     * @returns {void}
+     */
+    function schedule_reconnect() {
+        if (manual_close === true || opts.reconnect !== true) {
+            return;
+        }
+        clear_reconnect_timer();
+        const jitter = Math.random() * 200;
+        reconnect_timer = setTimeout(function () {
+            reconnect_timer = null;
+            reconnect_delay = Math.min(
+                reconnect_delay * 1.5,
+                opts.max_delay
+            );
+            connect();
+        }, reconnect_delay + jitter);
+    }
 
     /**
      * Establishes the WebSocket connection and sets up binary handlers.
      * @returns {void}
      */
     function connect() {
-        if (WebSocket === undefined) {
+        if (typeof WebSocket === "undefined") {
+            return;
+        }
+        if (manual_close === true) {
             return;
         }
 
-        socket = new WebSocket(url);
+        clear_reconnect_timer();
+
+        try {
+            socket = new WebSocket(url);
+        } catch (err) {
+            console.error("Roomer WebSocket connection error: ", err);
+            const is_reconnecting = (manual_close === false && opts.reconnect === true);
+            Object.keys(rooms).forEach(function (r_name) {
+                if (rooms[r_name] !== undefined) {
+                    rooms[r_name].forceClose(is_reconnecting);
+                }
+            });
+            if (is_reconnecting === true) {
+                schedule_reconnect();
+            }
+            return;
+        }
+
         socket.binaryType = "arraybuffer";
 
         socket.onopen = function () {
@@ -255,15 +309,19 @@ function roomer(url, options) {
             // Re-join previously active rooms upon reconnect
             Object.keys(rooms).forEach(function (r_name) {
                 if (r_name !== "root") {
-                    socket.send(
-                        new_message(
-                            r_name,
-                            "join",
-                            "",
-                            "",
-                            ""
-                        )
-                    );
+                    try {
+                        socket.send(
+                            new_message(
+                                r_name,
+                                "join",
+                                "",
+                                "",
+                                ""
+                            )
+                        );
+                    } catch (err) {
+                        console.error("Failed to send join frame on reconnect: ", err);
+                    }
                 }
             });
         };
@@ -297,18 +355,13 @@ function roomer(url, options) {
         socket.onclose = function () {
             const is_reconnecting = (manual_close === false && opts.reconnect === true);
             Object.keys(rooms).forEach(function (r_name) {
-                rooms[r_name].forceClose(is_reconnecting);
+                if (rooms[r_name] !== undefined) {
+                    rooms[r_name].forceClose(is_reconnecting);
+                }
             });
 
             if (is_reconnecting === true) {
-                const jitter = Math.random() * 200;
-                setTimeout(function () {
-                    reconnect_delay = Math.min(
-                        reconnect_delay * 1.5,
-                        opts.max_delay
-                    );
-                    connect();
-                }, reconnect_delay + jitter);
+                schedule_reconnect();
             }
         };
 
@@ -370,10 +423,10 @@ function roomer(url, options) {
                 is_open = false;
                 members.length = 0;
                 self.emit("close");
-                if (is_disconnect !== true) {
-                    member_id = "";
-                    delete rooms[name];
-                }
+            }
+            if (is_disconnect !== true) {
+                member_id = "";
+                delete rooms[name];
             }
             return self;
         }
@@ -419,15 +472,19 @@ function roomer(url, options) {
                 socket !== undefined &&
                 socket.readyState === WebSocket.OPEN
             ) {
-                socket.send(
-                    new_message(
-                        name,
-                        "leave",
-                        "",
-                        "",
-                        ""
-                    )
-                );
+                try {
+                    socket.send(
+                        new_message(
+                            name,
+                            "leave",
+                            "",
+                            "",
+                            ""
+                        )
+                    );
+                } catch (err) {
+                    console.error("Failed to send leave packet: ", err);
+                }
             }
             return self;
         }
@@ -530,7 +587,11 @@ function roomer(url, options) {
                 socket !== undefined &&
                 socket.readyState === WebSocket.OPEN
             ) {
-                socket.send(new_message(name, event, dst, member_id, payload));
+                try {
+                    socket.send(new_message(name, event, dst, member_id, payload));
+                } catch (err) {
+                    console.error("Failed to send message frame: ", err);
+                }
             }
             return self;
         }
@@ -549,6 +610,29 @@ function roomer(url, options) {
         };
 
         if (name === "root") {
+            /**
+             * Explicitly closes the WebSocket connection and all active rooms.
+             *
+             * @returns {Room} The root room instance.
+             */
+            room_methods.close = function () {
+                manual_close = true;
+                clear_reconnect_timer();
+                if (socket !== undefined) {
+                    try {
+                        socket.close();
+                    } catch (err) {
+                        console.error("Failed to close WebSocket: ", err);
+                    }
+                }
+                Object.keys(rooms).forEach(function (r_name) {
+                    if (rooms[r_name] !== undefined) {
+                        rooms[r_name].forceClose(false);
+                    }
+                });
+                return self;
+            };
+
             /**
              * Leaves all active non-root rooms simultaneously.
              *
@@ -594,9 +678,13 @@ function roomer(url, options) {
             socket !== undefined &&
             socket.readyState === WebSocket.OPEN
         ) {
-            socket.send(
-                new_message(name, "join", "", "", "")
-            );
+            try {
+                socket.send(
+                    new_message(name, "join", "", "", "")
+                );
+            } catch (err) {
+                console.error("Failed to send join frame: ", err);
+            }
         }
 
         return self;

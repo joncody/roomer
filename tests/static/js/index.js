@@ -201,6 +201,10 @@ function run_all_tests() {
         typeof root.purge === "function",
         "Root room instance includes purge() method"
     );
+    runner.assert(
+        typeof root.close === "function",
+        "Root room instance includes close() method"
+    );
 
     // -------------------------------------------------------------------------
     // GROUP 2: Member ID & Initial State
@@ -372,9 +376,9 @@ function run_all_tests() {
     );
 
     // -------------------------------------------------------------------------
-    // GROUP 7: Force Close & Purge
+    // GROUP 7: Force Close, Root Close & Purge
     // -------------------------------------------------------------------------
-    runner.group("7. Force Close & Purge");
+    runner.group("7. Force Close, Root Close & Purge");
 
     let close_fired = false;
     root.on("close", function () {
@@ -390,6 +394,56 @@ function run_all_tests() {
     runner.assert(
         root.open() === false,
         "open() returns false after forceClose()"
+    );
+
+    // Instantiate and activate a fresh roomer instance with join_ack
+    const fresh_client = roomer(ws_url);
+    fresh_client.parse(packet);
+
+    let fresh_close_fired = false;
+    fresh_client.on("close", function () {
+        fresh_close_fired = true;
+    });
+
+    // Join and activate a sub-room channel
+    const sub_room = fresh_client.join("sub_channel");
+    const sub_ack_packet = parse_packet_data(encode_packet(
+        "sub_channel",
+        "join_ack",
+        "",
+        "user_123",
+        "[]"
+    ));
+    sub_room.parse(sub_ack_packet);
+
+    let sub_close_fired = false;
+    sub_room.on("close", function () {
+        sub_close_fired = true;
+    });
+
+    runner.assert(
+        typeof fresh_client.close === "function",
+        "root.close() is available on root room interface"
+    );
+
+    // Execute root.close() to tear down connection and all sub-rooms
+    fresh_client.close();
+
+    runner.assert(
+        fresh_close_fired === true,
+        "root.close() triggers room teardown and close event"
+    );
+    runner.assert(
+        fresh_client.open() === false,
+        "root.close() sets open() to false on root room"
+    );
+    runner.assert(
+        sub_close_fired === true,
+        "root.close() cascades teardown and close event to sub-rooms"
+    );
+    runner.assert(
+        sub_room.open() === false,
+        "root.close() sets open() to false on sub-rooms"
     );
 
     runner.render_summary(start_time);
