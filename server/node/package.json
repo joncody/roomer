@@ -1,6 +1,6 @@
 {
     "name": "roomer-server",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "High-performance, room-based WebSocket server with binary framing and multi-node clustering for Node.js",
     "main": "index.js",
     "type": "module",
