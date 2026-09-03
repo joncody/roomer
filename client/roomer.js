@@ -176,7 +176,7 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
  * @property {(exceptions?: string[]) => Room} clearListeners
  *     Removes registered event listeners except those in exceptions.
  * @property {() => Room} [close]
- *     Explicitly closes the WebSocket connection and all active rooms (root only).
+ *     Explicitly closes connection and all active rooms (root only).
  * @property {(is_disconnect?: boolean) => Room} forceClose
  *     Forces the room to close locally and clears member state.
  * @property {() => string} id
@@ -276,7 +276,7 @@ function roomer(url, options) {
      * @returns {void}
      */
     function connect() {
-        if (typeof WebSocket === "undefined") {
+        if (WebSocket === undefined) {
             return;
         }
         if (manual_close === true) {
@@ -289,7 +289,10 @@ function roomer(url, options) {
             socket = new WebSocket(url);
         } catch (err) {
             console.error("Roomer WebSocket connection error: ", err);
-            const is_reconnecting = (manual_close === false && opts.reconnect === true);
+            const is_reconnecting = (
+                manual_close === false &&
+                opts.reconnect === true
+            );
             Object.keys(rooms).forEach(function (r_name) {
                 if (rooms[r_name] !== undefined) {
                     rooms[r_name].forceClose(is_reconnecting);
@@ -320,7 +323,10 @@ function roomer(url, options) {
                             )
                         );
                     } catch (err) {
-                        console.error("Failed to send join frame on reconnect: ", err);
+                        console.error(
+                            "Failed to send join frame on reconnect: ",
+                            err
+                        );
                     }
                 }
             });
@@ -353,7 +359,10 @@ function roomer(url, options) {
         };
 
         socket.onclose = function () {
-            const is_reconnecting = (manual_close === false && opts.reconnect === true);
+            const is_reconnecting = (
+                manual_close === false &&
+                opts.reconnect === true
+            );
             Object.keys(rooms).forEach(function (r_name) {
                 if (rooms[r_name] !== undefined) {
                     rooms[r_name].forceClose(is_reconnecting);
@@ -415,7 +424,8 @@ function roomer(url, options) {
         /**
          * Closes the room locally and clears all tracked state.
          *
-         * @param {boolean} [is_disconnect=false] - Whether this close is due to socket drop.
+         * @param {boolean} [is_disconnect=false] - Whether this close is due
+         *     to socket drop.
          * @returns {Room} The room instance.
          */
         function forceClose(is_disconnect) {
@@ -588,7 +598,9 @@ function roomer(url, options) {
                 socket.readyState === WebSocket.OPEN
             ) {
                 try {
-                    socket.send(new_message(name, event, dst, member_id, payload));
+                    socket.send(
+                        new_message(name, event, dst, member_id, payload)
+                    );
                 } catch (err) {
                     console.error("Failed to send message frame: ", err);
                 }
