@@ -430,7 +430,11 @@ pub mod redis {
             Ok(members)
         }
 
-        async fn touch_presence(&self, conn_id: &str, rooms: &[String]) -> Result<(), AdapterError> {
+        async fn touch_presence(
+            &self,
+            conn_id: &str,
+            rooms: &[String],
+        ) -> Result<(), AdapterError> {
             if rooms.is_empty() {
                 return Ok(());
             }

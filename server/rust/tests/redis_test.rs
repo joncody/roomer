@@ -209,7 +209,10 @@ mod redis_tests {
         );
 
         // Send unicast message targeted exclusively to "node_target"
-        node_sender.publish_direct("node_target", &dm).await.unwrap();
+        node_sender
+            .publish_direct("node_target", &dm)
+            .await
+            .unwrap();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline {

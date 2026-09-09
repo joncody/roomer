@@ -92,7 +92,9 @@ impl Hub {
                 }
 
                 // Zero-copy local room fanout directly using raw wire Bytes
-                let room_name = channel_suffix.strip_prefix("room:").unwrap_or(channel_suffix);
+                let room_name = channel_suffix
+                    .strip_prefix("room:")
+                    .unwrap_or(channel_suffix);
                 if let Some(room) = rooms.get(room_name) {
                     room.emit_local(None, raw_frame);
                 }
