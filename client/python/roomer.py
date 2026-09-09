@@ -262,12 +262,14 @@ class Room(EventEmitter):
         send_packet_fn: Callable[[str, str, str, str, Any], None],
         get_room_fn: Callable[[str], Room],
         is_socket_open_fn: Callable[[], bool],
+        remove_room_fn: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
         self.name = name
         self._send_packet = send_packet_fn
         self._get_room = get_room_fn
         self._is_socket_open = is_socket_open_fn
+        self._remove_room = remove_room_fn
 
         self._member_id: str = ""
         self._is_open: bool = False
@@ -336,8 +338,10 @@ class Room(EventEmitter):
             self._is_open = False
             self._members.clear()
             self.emit("close")
-            if not is_disconnect:
-                self._member_id = ""
+        if not is_disconnect:
+            self._member_id = ""
+            if self._remove_room is not None:
+                self._remove_room(self.name)
         return self
 
     def parse(self, packet: Packet) -> None:
@@ -366,6 +370,8 @@ class Room(EventEmitter):
                 self._is_open = False
                 self._members.clear()
                 self._member_id = ""
+                if self._remove_room is not None:
+                    self._remove_room(self.name)
 
             case "member_left":
                 member_id = packet.payload_text()
@@ -396,6 +402,7 @@ class RoomerClient:
         initial_delay: float = 0.5,
         max_delay: float = 5.0,
         backoff_factor: float = 1.5,
+        **ws_kwargs: Any,
     ) -> None:
         if not isinstance(url, str):
             raise TypeError("WebSocket URL must be a string.")
@@ -405,6 +412,7 @@ class RoomerClient:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
         self.backoff_factor = backoff_factor
+        self.ws_kwargs = ws_kwargs
 
         self._rooms: dict[str, Room] = {}
         self._ws: Any = None
@@ -421,6 +429,10 @@ class RoomerClient:
         """Returns the default 'root' room instance."""
         return self._root
 
+    def _remove_room(self, name: str) -> None:
+        """Removes a room from active tracked rooms."""
+        self._rooms.pop(name, None)
+
     def get_room(self, name: str) -> Room:
         """Retrieves or instantiates a room client interface by name."""
         if not isinstance(name, str):
@@ -433,6 +445,7 @@ class RoomerClient:
             send_packet_fn=self._send_packet,
             get_room_fn=self.get_room,
             is_socket_open_fn=self.is_connected,
+            remove_room_fn=self._remove_room,
         )
 
         if name == "root":
@@ -501,7 +514,7 @@ class RoomerClient:
         while self._running:
             writer_task: asyncio.Task[None] | None = None
             try:
-                async with websockets.connect(self.url) as ws:
+                async with websockets.connect(self.url, **self.ws_kwargs) as ws:
                     self._ws = ws
                     self._reconnect_delay = self.initial_delay
 

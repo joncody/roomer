@@ -46,9 +46,10 @@ The `roomer-client` library provides an asynchronous, non-blocking interface for
 - **High-Performance Binary Wire Framing**: Serializes and unpacks 5 big-endian length-prefixed fields via native `struct.pack(">I", ...)` with zero-copy `memoryview` slicing.
 - **Dual-Mode Event Emitter**: Register event listeners as either standard synchronous functions (`def handler(...)`) or native coroutines (`async def handler(...)`).
 - **Async Context Manager**: Native `async with roomer("ws://...") as root:` pattern for deterministic lifecycle management and cleanup.
-- **Automatic Exponential Reconnection**: Recovers from abrupt socket disconnects with randomized jitter backoff while preserving room subscriptions across reconnects.
+- **Automatic Exponential Reconnection**: Recovers from abrupt socket disconnects with randomized jitter backoff while preserving active room subscriptions across reconnects.
 - **Cluster Presence Tracking**: Automatic handling of `join_ack` snapshots, `new_member` notifications, and `member_left` presence events.
 - **Direct 1-to-1 Point-to-Point Unicast**: Route messages directly to specific client UUIDs across cluster nodes with $O(1)$ efficiency.
+- **Custom Handshake & Auth Headers**: Supports passing `extra_headers` (e.g. Bearer authorization tokens) and SSL contexts directly into `websockets.connect`.
 
 ---
 
@@ -76,8 +77,11 @@ import asyncio
 from roomer import roomer
 
 async def main():
-    # Connect and auto-join the root room
-    async with roomer("ws://localhost:8080/ws") as root:
+    # Connect and auto-join the root room (supports auth headers via **kwargs)
+    async with roomer(
+        "ws://localhost:8080/ws",
+        extra_headers={"Authorization": "Bearer my_jwt_token"}
+    ) as root:
         print(f"Connected to Roomer cluster! Client ID: {root.id}")
 
         # Join a named room channel
@@ -148,10 +152,8 @@ client = RoomerClient("ws://localhost:8080/ws")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Connect Roomer client on FastAPI startup
     await client.connect()
     yield
-    # Gracefully close on shutdown
     await client.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -183,9 +185,7 @@ async def main():
         def on_dm(payload: bytes, sender_id: str):
             print(f"[Private DM from {sender_id}]: {payload.decode('utf-8')}")
 
-        # Send direct point-to-point packet (dst=target_client_id)
         root.send("direct_message", "Secret private message", dst=target_client_id)
-        
         await asyncio.sleep(2)
 
 asyncio.run(main())
@@ -193,28 +193,10 @@ asyncio.run(main())
 
 ---
 
-### 4. Custom Reconnection Backoff Configuration
-Fine-tune initial delay, backoff multiplier, and max backoff ceiling:
-
-```python
-from roomer import roomer
-
-# Configured for high-resilience environments
-root_context = roomer(
-    "ws://localhost:8080/ws",
-    reconnect=True,
-    initial_delay=0.250,   # Start at 250ms backoff
-    max_delay=10.0,        # Max backoff ceiling of 10s
-    backoff_factor=2.0     # Double backoff duration on consecutive drops
-)
-```
-
----
-
 ## 📚 API Reference
 
 ### `roomer(url, **kwargs) -> RoomerContext`
-Factory function creating an asynchronous context manager.
+Factory function creating an asynchronous context manager. Supports all `RoomerClient` arguments and passes extra `kwargs` (e.g. `extra_headers`, `ssl`) to `websockets.connect`.
 
 | Argument | Type | Default | Description |
 |---|---|---|---|
@@ -223,6 +205,7 @@ Factory function creating an asynchronous context manager.
 | `initial_delay` | `float` | `0.5` | Initial backoff delay in seconds. |
 | `max_delay` | `float` | `5.0` | Maximum reconnection delay ceiling in seconds. |
 | `backoff_factor` | `float` | `1.5` | Backoff multiplier applied on consecutive failures. |
+| `**ws_kwargs` | `Any` | — | Forwarded to `websockets.connect` (e.g. `extra_headers`, `ping_interval`, `ssl`). |
 
 ---
 
@@ -248,22 +231,6 @@ Factory function creating an asynchronous context manager.
 | `root.close()` *(root only)* | `Coroutine` | Gracefully closes all rooms and the WebSocket connection. |
 | `root.purge()` *(root only)* | `Room` | Unsubscribes from all non-root rooms simultaneously. |
 | `root.rooms()` *(root only)* | `dict[str, Room]` | Dictionary mapping of all active room handles. |
-
----
-
-### `Packet` Data Attributes & Helpers
-
-Decoded binary packet object passed into event handlers:
-
-| Attribute / Helper | Type | Description |
-|---|---|---|
-| `packet.room` | `str` | Target channel / room name. |
-| `packet.event` | `str` | Event descriptor string. |
-| `packet.dst` | `str` | Destination member ID (empty string if room broadcast). |
-| `packet.src` | `str` | Sender client ID. |
-| `packet.payload` | `bytes` | Raw binary payload bytes. |
-| `packet.payload_text()` | `str` | Decodes payload as UTF-8 string. |
-| `packet.payload_json()` | `Any` | Unmarshals binary payload as JSON. |
 
 ---
 

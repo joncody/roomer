@@ -1,7 +1,7 @@
 """
 Comprehensive test suite for the Roomer Python client.
 Covers wire framing, malformed input rejection, event emissions,
-room state machines, and async mock transports.
+room state machines, lifecycle cleanup, and async mock transports.
 """
 
 import json
@@ -123,7 +123,7 @@ def test_emitter_off():
 
 
 # ------------------------------------------------------------------------------
-# 3. Room State Machine Tests
+# 3. Room State Machine & Lifecycle Cleanup Tests
 # ------------------------------------------------------------------------------
 
 def test_room_join_ack_state_transition():
@@ -175,6 +175,32 @@ def test_room_member_presence_events():
     root.parse(Packet("root", "member_left", "", "", b"user_abc"))
     assert "user_abc" not in root.members()
     assert left_members == ["user_abc"]
+
+
+def test_room_leave_ack_cleans_up_client_registry():
+    client = RoomerClient("ws://localhost:8080/ws", reconnect=False)
+    lobby = client.get_room("lobby")
+    lobby._is_open = True
+    assert "lobby" in client._rooms
+
+    closed = False
+
+    @lobby.on("close")
+    def on_close():
+        nonlocal closed
+        closed = True
+
+    # Server confirms leave with leave_ack
+    lobby.parse(Packet("lobby", "leave_ack", "", "", b""))
+
+    assert closed
+    assert not lobby.is_open
+    assert "lobby" not in client._rooms
+
+    # Joining lobby again creates a clean new room handle
+    rejoined_lobby = client.get_room("lobby")
+    assert "lobby" in client._rooms
+    assert rejoined_lobby is not lobby
 
 
 def test_reserved_event_guard():
