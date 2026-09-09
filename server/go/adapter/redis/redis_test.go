@@ -45,11 +45,11 @@ func TestAdapter_InterfaceCompliance(t *testing.T) {
 func TestAdapter_OptionsAndPrefix(t *testing.T) {
 	mock := &mockClient{}
 
-	// Test prefix normalization (adds trailing colon)
 	a, err := New(mock,
 		WithPrefix("custom_prefix"),
 		WithNodeID("node_123"),
 		WithPublishTimeout(2*time.Second),
+		WithPresenceTTL(120*time.Second),
 		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	)
 	if err != nil {
@@ -65,6 +65,9 @@ func TestAdapter_OptionsAndPrefix(t *testing.T) {
 	}
 	if a.publishTimeout != 2*time.Second {
 		t.Errorf("expected timeout 2s, got %v", a.publishTimeout)
+	}
+	if a.presenceTTL != 120*time.Second {
+		t.Errorf("expected presenceTTL 120s, got %v", a.presenceTTL)
 	}
 }
 
@@ -86,8 +89,9 @@ func TestAdapter_Publish(t *testing.T) {
 	mock.mu.Lock()
 	defer mock.mu.Unlock()
 
-	if mock.publishedChannel != "roomer:lobby" {
-		t.Errorf("expected channel 'roomer:lobby', got %q", mock.publishedChannel)
+	// True wire-level unicast split: room publishes go to prefix:room:<name>
+	if mock.publishedChannel != "roomer:room:lobby" {
+		t.Errorf("expected channel 'roomer:room:lobby', got %q", mock.publishedChannel)
 	}
 
 	payload := mock.publishedPayload
@@ -111,6 +115,31 @@ func TestAdapter_Publish(t *testing.T) {
 	}
 	if !bytes.Equal(parsedMsg.Payload, []byte("hello redis")) {
 		t.Errorf("expected payload 'hello redis', got %s", string(parsedMsg.Payload))
+	}
+}
+
+func TestAdapter_PublishDirect(t *testing.T) {
+	mock := &mockClient{}
+	nodeID := "node_sender"
+	targetNodeID := "node_target_999"
+	a, err := New(mock, WithNodeID(nodeID), WithPrefix("roomer:"))
+	if err != nil {
+		t.Fatalf("failed to create adapter: %v", err)
+	}
+	defer a.Close()
+
+	msg := roomer.NewMessage("root", "whisper", "client_dst", "client_src", []byte("direct msg"))
+	err = a.PublishDirect(context.Background(), targetNodeID, msg)
+	if err != nil {
+		t.Fatalf("PublishDirect failed: %v", err)
+	}
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+
+	expectedChannel := "roomer:node:" + targetNodeID
+	if mock.publishedChannel != expectedChannel {
+		t.Errorf("expected direct channel %q, got %q", expectedChannel, mock.publishedChannel)
 	}
 }
 
@@ -141,7 +170,7 @@ func TestAdapter_LoopbackSuppression(t *testing.T) {
 	copy(envSelf[4+len(nodeSelf):], rawMsg)
 
 	a.handleIncoming(&goredis.Message{
-		Channel: "roomer:lobby",
+		Channel: "roomer:room:lobby",
 		Payload: string(envSelf),
 	}, handler)
 
@@ -156,7 +185,7 @@ func TestAdapter_LoopbackSuppression(t *testing.T) {
 	copy(envRemote[4+len(nodeRemote):], rawMsg)
 
 	a.handleIncoming(&goredis.Message{
-		Channel: "roomer:lobby",
+		Channel: "roomer:room:lobby",
 		Payload: string(envRemote),
 	}, handler)
 
@@ -183,18 +212,18 @@ func TestAdapter_MalformedMessages(t *testing.T) {
 	}
 
 	// Packet too short
-	a.handleIncoming(&goredis.Message{Channel: "roomer:lobby", Payload: "abc"}, handler)
+	a.handleIncoming(&goredis.Message{Channel: "roomer:room:lobby", Payload: "abc"}, handler)
 
 	// NodeID length header exceeds payload length
 	invalidLen := []byte{0, 0, 0, 50, 'a', 'b', 'c'}
-	a.handleIncoming(&goredis.Message{Channel: "roomer:lobby", Payload: string(invalidLen)}, handler)
+	a.handleIncoming(&goredis.Message{Channel: "roomer:room:lobby", Payload: string(invalidLen)}, handler)
 
 	// Valid NodeID header, but invalid roomer message
 	validHeaderBadMsg := make([]byte, 4+4+3)
 	binary.BigEndian.PutUint32(validHeaderBadMsg[0:4], 4)
 	copy(validHeaderBadMsg[4:8], "node")
 	copy(validHeaderBadMsg[8:], []byte{1, 2, 3}) // corrupt message
-	a.handleIncoming(&goredis.Message{Channel: "roomer:lobby", Payload: string(validHeaderBadMsg)}, handler)
+	a.handleIncoming(&goredis.Message{Channel: "roomer:room:lobby", Payload: string(validHeaderBadMsg)}, handler)
 }
 
 func TestAdapter_CloseIdempotency(t *testing.T) {
@@ -242,7 +271,7 @@ func BenchmarkAdapter_HandleIncoming_Remote(b *testing.B) {
 	copy(envRemote[4+len(nodeRemote):], rawMsg)
 
 	rMsg := &goredis.Message{
-		Channel: "roomer:lobby",
+		Channel: "roomer:room:lobby",
 		Payload: string(envRemote),
 	}
 
@@ -268,7 +297,7 @@ func BenchmarkAdapter_HandleIncoming_SelfSuppressed(b *testing.B) {
 	copy(envSelf[4+len(selfNode):], rawMsg)
 
 	rMsg := &goredis.Message{
-		Channel: "roomer:lobby",
+		Channel: "roomer:room:lobby",
 		Payload: string(envSelf),
 	}
 

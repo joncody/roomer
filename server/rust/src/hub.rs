@@ -92,7 +92,8 @@ impl Hub {
                 }
 
                 // Zero-copy local room fanout directly using raw wire Bytes
-                if let Some(room) = rooms.get(channel_suffix) {
+                let room_name = channel_suffix.strip_prefix("room:").unwrap_or(channel_suffix);
+                if let Some(room) = rooms.get(room_name) {
                     room.emit_local(None, raw_frame);
                 }
             }))
@@ -232,6 +233,21 @@ impl Hub {
     pub fn leave_all_rooms(&self, conn: &Arc<Conn>) {
         for room_name in conn.joined_rooms() {
             self.leave_room(&room_name, conn);
+        }
+    }
+
+    /// Touches presence heartbeat timestamp for a connection in the specified rooms.
+    pub fn touch_presence(&self, conn_id: &str, rooms: Vec<String>) {
+        if rooms.is_empty() {
+            return;
+        }
+        let adapter_lock = self.adapter.clone();
+        let conn_id = conn_id.to_string();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let adapter = adapter_lock.read().await;
+                let _ = adapter.touch_presence(&conn_id, &rooms).await;
+            });
         }
     }
 

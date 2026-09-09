@@ -25,6 +25,9 @@ type Adapter interface {
 	// GetPresence retrieves all connection IDs in a room across the entire cluster.
 	GetPresence(ctx context.Context, room string) ([]string, error)
 
+	// TouchPresence updates the last-seen heartbeat timestamp for a connection in the specified rooms.
+	TouchPresence(ctx context.Context, connID string, rooms []string) error
+
 	// RegisterNode maps a connection ID to this node ID in the cluster registry.
 	RegisterNode(ctx context.Context, connID string) error
 
@@ -104,6 +107,10 @@ func (a *localAdapter) GetPresence(ctx context.Context, room string) ([]string, 
 		members = append(members, id)
 	}
 	return members, nil
+}
+
+func (a *localAdapter) TouchPresence(ctx context.Context, connID string, rooms []string) error {
+	return nil
 }
 
 func (a *localAdapter) RegisterNode(ctx context.Context, connID string) error {

@@ -32,7 +32,6 @@ mod redis_tests {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
 
-        // Skip test if no local Redis server is running
         let client = match ::redis::Client::open(redis_url.clone()) {
             Ok(c) => c,
             Err(_) => return,
@@ -75,7 +74,7 @@ mod redis_tests {
             .await
             .unwrap();
 
-        // 1. Verify Cluster Presence Sync
+        // 1. Verify Cluster Presence Sync & Pipelined Heartbeat Touch
         node_a.add_presence("lobby", "client_on_A").await.unwrap();
         node_b.add_presence("lobby", "client_on_B").await.unwrap();
 
@@ -88,19 +87,18 @@ mod redis_tests {
         assert!(presence.contains(&"client_on_A".to_string()));
         assert!(presence.contains(&"client_on_B".to_string()));
 
-        // 2. Verify Node Registry & Targeted Unicast Routing
+        // Pipelined presence touch across rooms
+        node_a
+            .touch_presence("client_on_A", &["lobby".into(), "room_touch".into()])
+            .await
+            .unwrap();
+        let touch_presence = node_a.get_presence("room_touch").await.unwrap();
+        assert_eq!(touch_presence, vec!["client_on_A".to_string()]);
+
+        // 2. Verify Node Registry
         node_b.register_node("client_on_B").await.unwrap();
         let target_node = node_a.get_node_for_conn("client_on_B").await.unwrap();
         assert_eq!(target_node, Some("node_B".to_string()));
-
-        let dm = Message::new(
-            "root",
-            "dm",
-            "client_on_B",
-            "client_on_A",
-            Bytes::from_static(b"unicast"),
-        );
-        node_a.publish_direct("node_B", &dm).await.unwrap();
 
         // Allow Redis subscription to register
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -144,5 +142,96 @@ mod redis_tests {
 
         node_a.close().await.unwrap();
         node_b.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_live_redis_true_wire_level_unicast() {
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+
+        let client = match ::redis::Client::open(redis_url.clone()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if client.get_multiplexed_async_connection().await.is_err() {
+            eprintln!("Skipping live Redis test: Redis not reachable at {redis_url}");
+            return;
+        }
+
+        let prefix = format!("roomer:unicast:{}:", uuid::Uuid::new_v4());
+
+        // Sender, Target, and Bystander nodes
+        let node_sender = RedisAdapter::builder(&redis_url)
+            .node_id("node_sender")
+            .prefix(&prefix)
+            .build()
+            .unwrap();
+
+        let node_target = RedisAdapter::builder(&redis_url)
+            .node_id("node_target")
+            .prefix(&prefix)
+            .build()
+            .unwrap();
+
+        let node_bystander = RedisAdapter::builder(&redis_url)
+            .node_id("node_bystander")
+            .prefix(&prefix)
+            .build()
+            .unwrap();
+
+        let target_received = Arc::new(AtomicUsize::new(0));
+        let bystander_received = Arc::new(AtomicUsize::new(0));
+
+        let t_counter = target_received.clone();
+        node_target
+            .subscribe(Arc::new(move |_room, _sender, _raw| {
+                t_counter.fetch_add(1, Ordering::SeqCst);
+            }))
+            .await
+            .unwrap();
+
+        let b_counter = bystander_received.clone();
+        node_bystander
+            .subscribe(Arc::new(move |_room, _sender, _raw| {
+                b_counter.fetch_add(1, Ordering::SeqCst);
+            }))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let dm = Message::new(
+            "root",
+            "dm",
+            "client_target",
+            "client_sender",
+            Bytes::from_static(b"wire_level_secret"),
+        );
+
+        // Send unicast message targeted exclusively to "node_target"
+        node_sender.publish_direct("node_target", &dm).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if target_received.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            target_received.load(Ordering::SeqCst),
+            1,
+            "Target node must receive the direct message"
+        );
+        assert_eq!(
+            bystander_received.load(Ordering::SeqCst),
+            0,
+            "Bystander node must NOT receive unicast traffic over the wire"
+        );
+
+        node_sender.close().await.unwrap();
+        node_target.close().await.unwrap();
+        node_bystander.close().await.unwrap();
     }
 }

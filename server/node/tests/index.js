@@ -86,21 +86,17 @@ test("Message framing: Empty strings and zero-byte payload", function () {
 });
 
 test("Message framing: Rejection of malformed / truncated inputs", function () {
-    // Underflow (< 20 bytes)
     assert.equal(decode_message(Buffer.from([0, 0, 0, 5])), null);
     assert.equal(decode_message(Buffer.alloc(19)), null);
 
-    // Truncated room length header (claims 50 bytes on a 25 byte buffer)
     const truncated_room = Buffer.alloc(25);
     truncated_room.writeUInt32BE(50, 0);
     assert.equal(decode_message(truncated_room), null);
 
-    // Truncated payload length header (claims 100 bytes, buffer only has 20)
     const truncated_payload = Buffer.alloc(20);
     truncated_payload.writeUInt32BE(100, 16);
     assert.equal(decode_message(truncated_payload), null);
 
-    // Trailing bytes beyond declared length
     const valid = create_message("r", "e", "", "", "p").encode();
     const with_trailing = Buffer.concat([valid, Buffer.from([1, 2, 3])]);
     assert.equal(decode_message(with_trailing), null);
@@ -130,12 +126,10 @@ test("Hub: Atomic join, leave, presence tracking, and empty room cleanup", async
     assert.ok(presence.includes("user_1"));
     assert.ok(presence.includes("user_2"));
 
-    // User 1 leaves -> room remains with user 2
     hub.leave_room("lobby", c1);
     assert.equal(room.len(), 1);
     assert.equal(hub.get_room("lobby") !== undefined, true);
 
-    // User 2 leaves -> room is garbage-collected
     hub.leave_room("lobby", c2);
     assert.equal(hub.get_room("lobby"), undefined);
 });
@@ -176,12 +170,13 @@ test("LocalAdapter: In-memory presence and node registry contract", async functi
     assert.ok(presence.includes("client_100"));
     assert.ok(presence.includes("client_200"));
 
+    await adapter.touch_presence("client_100", ["channel_a"]);
+
     await adapter.remove_presence("channel_a", "client_100");
     presence = await adapter.get_presence("channel_a");
     assert.equal(presence.length, 1);
     assert.equal(presence[0], "client_200");
 
-    // Node registry
     await adapter.register_node("client_200");
     const node = await adapter.get_node_for_conn("client_200");
     assert.equal(node, "test-node-1");
@@ -226,7 +221,6 @@ test("Custom Adapter: User-provided mock adapter integrates seamlessly", async f
     const published_channels = [];
     const published_messages = [];
 
-    // Define a custom user adapter conforming to the specification
     const custom_adapter = Object.freeze({
         add_presence: async function () {},
         close: async function () {},
@@ -246,6 +240,7 @@ test("Custom Adapter: User-provided mock adapter integrates seamlessly", async f
         register_node: async function () {},
         remove_presence: async function () {},
         subscribe: async function () {},
+        touch_presence: async function () {},
         unregister_node: async function () {}
     });
 
@@ -255,20 +250,17 @@ test("Custom Adapter: User-provided mock adapter integrates seamlessly", async f
     hub.add_conn(conn);
     await hub.join_room("news", conn);
 
-    // Broadcast triggers custom adapter publish
     const msg = create_message("news", "headline", "", "c1", "Breaking news");
     hub.broadcast_room("c1", msg);
 
     assert.ok(published_channels.includes("news"));
 
-    // Find the headline message (published after the initial new_member presence event)
     const headline_msg = published_messages.find(function (m) {
         return m !== null && m.event === "headline";
     });
-    assert.ok(headline_msg !== undefined, "Headline message should be published to custom adapter");
+    assert.ok(headline_msg !== undefined);
     assert.equal(headline_msg.payloadString(), "Breaking news");
 
-    // Presence is the union of local member c1 and remote cluster presence (user_mock_1, user_mock_2)
     const presence = await hub.get_cluster_presence("news");
     assert.equal(presence.length, 3);
     assert.ok(presence.includes("c1"));
@@ -296,7 +288,6 @@ test("Concurrency: 50 concurrent connections joining, messaging, and leaving", a
 
     assert.equal(metrics.getStats().active_connections, total_conns);
 
-    // Concurrently join 5 different rooms
     await Promise.all(conns.map(function (c, idx) {
         const room_name = "room_" + (idx % 5);
         return hub.join_room(room_name, c);
@@ -304,14 +295,12 @@ test("Concurrency: 50 concurrent connections joining, messaging, and leaving", a
 
     assert.equal(metrics.getStats().active_rooms, 5);
 
-    // Concurrently broadcast
     conns.forEach(function (c, idx) {
         const room_name = "room_" + (idx % 5);
         const msg = create_message(room_name, "chat", "", c.id, "ping " + idx);
         hub.broadcast_room(c.id, msg);
     });
 
-    // Concurrently leave all rooms and clean up
     conns.forEach(function (c) {
         hub.leave_all_rooms(c);
         hub.remove_conn(c.id);
@@ -356,8 +345,8 @@ test("Live Redis: Two-node cluster synchronization, loopback suppression, and pr
     }
 
     const prefix = "roomer:test:" + Date.now() + ":";
-    const node_a = create_redis_adapter(pub_a, sub_a, { node_id: "server_node_A", prefix });
-    const node_b = create_redis_adapter(pub_b, sub_b, { node_id: "server_node_B", prefix });
+    const node_a = create_redis_adapter(pub_a, sub_a, { node_id: "server_node_A", prefix, presence_ttl: 180 });
+    const node_b = create_redis_adapter(pub_b, sub_b, { node_id: "server_node_B", prefix, presence_ttl: 180 });
 
     let node_a_received = 0;
     let node_b_received = 0;
@@ -370,14 +359,19 @@ test("Live Redis: Two-node cluster synchronization, loopback suppression, and pr
         node_b_received += 1;
     });
 
-    // 1. Verify Cluster Presence Synchronization
+    // 1. Verify Cluster Presence Synchronization & Pipelined Touch
     await node_a.add_presence("lobby", "client_on_A");
     await node_b.add_presence("lobby", "client_on_B");
 
-    const presence = await node_a.get_presence("lobby");
+    let presence = await node_a.get_presence("lobby");
     assert.equal(presence.length, 2, "Presence set must contain members across all nodes");
     assert.ok(presence.includes("client_on_A"));
     assert.ok(presence.includes("client_on_B"));
+
+    // Pipelined presence touch across rooms
+    await node_a.touch_presence("client_on_A", ["lobby", "room_touch"]);
+    const touched_presence = await node_a.get_presence("room_touch");
+    assert.deepEqual(touched_presence, ["client_on_A"]);
 
     // 2. Verify Node Registry & Targeted Unicast Routing
     await node_b.register_node("client_on_B");
@@ -391,7 +385,6 @@ test("Live Redis: Two-node cluster synchronization, loopback suppression, and pr
         await node_a.publish("lobby", msg);
     }
 
-    // Wait up to 3 seconds for messages to arrive at Node B
     const deadline = Date.now() + 3000;
     while (Date.now() < deadline) {
         if (node_b_received >= total_messages) {
@@ -412,4 +405,76 @@ test("Live Redis: Two-node cluster synchronization, loopback suppression, and pr
 
     await node_a.close();
     await node_b.close();
+});
+
+test("Live Redis: True wire-level unicast isolation across 3 nodes", async function (t) {
+    const redis_addr = process.env.REDIS_ADDR || "localhost:6379";
+    let redis_url = redis_addr;
+    if (
+        redis_url.startsWith("redis://") === false &&
+        redis_url.startsWith("rediss://") === false
+    ) {
+        redis_url = "redis://" + redis_url;
+    }
+
+    const pub_s = new Redis(redis_url, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 1000 });
+    const sub_s = pub_s.duplicate();
+    const pub_t = new Redis(redis_url, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 1000 });
+    const sub_t = pub_t.duplicate();
+    const pub_b = new Redis(redis_url, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 1000 });
+    const sub_b = pub_b.duplicate();
+
+    try {
+        await Promise.all([
+            pub_s.connect(), sub_s.connect(),
+            pub_t.connect(), sub_t.connect(),
+            pub_b.connect(), sub_b.connect()
+        ]);
+    } catch (err) {
+        t.skip("Skipping live Redis unicast test: Redis not reachable at " + redis_addr);
+        pub_s.disconnect(); sub_s.disconnect();
+        pub_t.disconnect(); sub_t.disconnect();
+        pub_b.disconnect(); sub_b.disconnect();
+        return;
+    }
+
+    const prefix = "roomer:unicast:" + Date.now() + ":";
+    const node_sender = create_redis_adapter(pub_s, sub_s, { node_id: "node_sender", prefix });
+    const node_target = create_redis_adapter(pub_t, sub_t, { node_id: "node_target", prefix });
+    const node_bystander = create_redis_adapter(pub_b, sub_b, { node_id: "node_bystander", prefix });
+
+    let target_received = 0;
+    let bystander_received = 0;
+
+    await node_target.subscribe(function () {
+        target_received += 1;
+    });
+
+    await node_bystander.subscribe(function () {
+        bystander_received += 1;
+    });
+
+    await new Promise(function (resolve) {
+        setTimeout(resolve, 100);
+    });
+
+    const dm = create_message("root", "dm", "client_target", "client_sender", "wire_secret");
+    await node_sender.publish_direct("node_target", dm);
+
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+        if (target_received >= 1) {
+            break;
+        }
+        await new Promise(function (resolve) {
+            setTimeout(resolve, 20);
+        });
+    }
+
+    assert.equal(target_received, 1, "Target node must receive the direct unicast message");
+    assert.equal(bystander_received, 0, "Bystander node must NOT receive unicast traffic over the wire");
+
+    await node_sender.close();
+    await node_target.close();
+    await node_bystander.close();
 });

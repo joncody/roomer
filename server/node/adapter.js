@@ -11,6 +11,7 @@
  * - add_presence(room, conn_id)           : Promise<void>
  * - remove_presence(room, conn_id)        : Promise<void>
  * - get_presence(room)                    : Promise<string[]>
+ * - touch_presence(conn_id, rooms)        : Promise<void>
  * - register_node(conn_id)                : Promise<void>
  * - unregister_node(conn_id)              : Promise<void>
  * - get_node_for_conn(conn_id)            : Promise<string|null>
@@ -62,6 +63,8 @@ function create_local_adapter(custom_node_id) {
         return Object.keys(presence_map[room]);
     }
 
+    async function touch_presence() {}
+
     async function register_node(conn_id) {
         node_map[conn_id] = node_id_val;
     }
@@ -97,6 +100,7 @@ function create_local_adapter(custom_node_id) {
         register_node,
         remove_presence,
         subscribe,
+        touch_presence,
         unregister_node
     });
 }

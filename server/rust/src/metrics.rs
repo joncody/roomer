@@ -33,22 +33,58 @@ impl Metrics for NopMetrics {}
 /// Dynamic trait object type alias for metrics.
 pub type DynMetrics = Arc<dyn Metrics>;
 
-/// Atomic in-memory metrics counter implementation for diagnostics and tests.
+/// Cache-line aligned container for connection counters (eliminates false sharing).
+#[repr(align(64))]
+#[derive(Default, Debug)]
+struct ConnMetrics {
+    active: AtomicUsize,
+    total: AtomicU64,
+}
+
+/// Cache-line aligned container for room counters (eliminates false sharing).
+#[repr(align(64))]
+#[derive(Default, Debug)]
+struct RoomMetrics {
+    active: AtomicUsize,
+    total: AtomicU64,
+}
+
+/// Cache-line aligned container for outbound traffic counters (eliminates false sharing).
+#[repr(align(64))]
+#[derive(Default, Debug)]
+struct OutboundMetrics {
+    messages: AtomicU64,
+    bytes: AtomicU64,
+    dropped: AtomicU64,
+}
+
+/// Cache-line aligned container for inbound traffic counters (eliminates false sharing).
+#[repr(align(64))]
+#[derive(Default, Debug)]
+struct InboundMetrics {
+    messages: AtomicU64,
+    bytes: AtomicU64,
+}
+
+/// Cache-line aligned container for cluster transit counters (eliminates false sharing).
+#[repr(align(64))]
+#[derive(Default, Debug)]
+struct ClusterMetrics {
+    published: AtomicU64,
+    bytes_published: AtomicU64,
+    received: AtomicU64,
+    bytes_received: AtomicU64,
+    dropped: AtomicU64,
+}
+
+/// Atomic in-memory metrics counter implementation with 64-byte CPU cache line isolation.
 #[derive(Default, Debug)]
 pub struct InMemoryMetrics {
-    active_connections: AtomicUsize,
-    total_connections: AtomicU64,
-    active_rooms: AtomicUsize,
-    total_rooms: AtomicU64,
-    messages_sent: AtomicU64,
-    messages_received: AtomicU64,
-    messages_dropped: AtomicU64,
-    bytes_sent: AtomicU64,
-    bytes_received: AtomicU64,
-    cluster_published: AtomicU64,
-    cluster_received: AtomicU64,
-    cluster_bytes_published: AtomicU64,
-    cluster_bytes_received: AtomicU64,
+    conns: ConnMetrics,
+    rooms: RoomMetrics,
+    outbound: OutboundMetrics,
+    inbound: InboundMetrics,
+    cluster: ClusterMetrics,
 }
 
 impl InMemoryMetrics {
@@ -60,103 +96,112 @@ impl InMemoryMetrics {
 
     /// Current number of active WebSocket connections.
     pub fn active_connections(&self) -> usize {
-        self.active_connections.load(Ordering::Relaxed)
+        self.conns.active.load(Ordering::Relaxed)
     }
 
     /// Cumulative count of all connected clients.
     pub fn total_connections(&self) -> u64 {
-        self.total_connections.load(Ordering::Relaxed)
+        self.conns.total.load(Ordering::Relaxed)
     }
 
     /// Current number of active rooms.
     pub fn active_rooms(&self) -> usize {
-        self.active_rooms.load(Ordering::Relaxed)
+        self.rooms.active.load(Ordering::Relaxed)
     }
 
     /// Cumulative count of all created rooms.
     pub fn total_rooms(&self) -> u64 {
-        self.total_rooms.load(Ordering::Relaxed)
+        self.rooms.total.load(Ordering::Relaxed)
     }
 
     /// Cumulative number of messages sent to clients.
     pub fn messages_sent(&self) -> u64 {
-        self.messages_sent.load(Ordering::Relaxed)
+        self.outbound.messages.load(Ordering::Relaxed)
     }
 
     /// Cumulative number of messages received from clients.
     pub fn messages_received(&self) -> u64 {
-        self.messages_received.load(Ordering::Relaxed)
+        self.inbound.messages.load(Ordering::Relaxed)
     }
 
     /// Cumulative number of messages dropped due to slow clients.
     pub fn messages_dropped(&self) -> u64 {
-        self.messages_dropped.load(Ordering::Relaxed)
+        self.outbound.dropped.load(Ordering::Relaxed)
     }
 
     /// Cumulative outbound bytes sent.
     pub fn bytes_sent(&self) -> u64 {
-        self.bytes_sent.load(Ordering::Relaxed)
+        self.outbound.bytes.load(Ordering::Relaxed)
     }
 
     /// Cumulative inbound bytes received.
     pub fn bytes_received(&self) -> u64 {
-        self.bytes_received.load(Ordering::Relaxed)
+        self.inbound.bytes.load(Ordering::Relaxed)
     }
 
     /// Cumulative messages published to cluster.
     pub fn cluster_published(&self) -> u64 {
-        self.cluster_published.load(Ordering::Relaxed)
+        self.cluster.published.load(Ordering::Relaxed)
     }
 
     /// Cumulative messages received from cluster.
     pub fn cluster_received(&self) -> u64 {
-        self.cluster_received.load(Ordering::Relaxed)
+        self.cluster.received.load(Ordering::Relaxed)
     }
 }
 
 impl Metrics for InMemoryMetrics {
     fn on_connect(&self) {
-        self.active_connections.fetch_add(1, Ordering::Relaxed);
-        self.total_connections.fetch_add(1, Ordering::Relaxed);
+        self.conns.active.fetch_add(1, Ordering::Relaxed);
+        self.conns.total.fetch_add(1, Ordering::Relaxed);
     }
 
     fn on_disconnect(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        self.conns.active.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn on_message_sent(&self, bytes: usize) {
-        self.messages_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.outbound.messages.fetch_add(1, Ordering::Relaxed);
+        self.outbound
+            .bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn on_message_received(&self, bytes: usize) {
-        self.messages_received.fetch_add(1, Ordering::Relaxed);
-        self.bytes_received
+        self.inbound.messages.fetch_add(1, Ordering::Relaxed);
+        self.inbound
+            .bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn on_message_dropped(&self) {
-        self.messages_dropped.fetch_add(1, Ordering::Relaxed);
+        self.outbound.dropped.fetch_add(1, Ordering::Relaxed);
     }
 
     fn on_room_created(&self, _room: &str) {
-        self.active_rooms.fetch_add(1, Ordering::Relaxed);
-        self.total_rooms.fetch_add(1, Ordering::Relaxed);
+        self.rooms.active.fetch_add(1, Ordering::Relaxed);
+        self.rooms.total.fetch_add(1, Ordering::Relaxed);
     }
 
     fn on_room_deleted(&self, _room: &str) {
-        self.active_rooms.fetch_sub(1, Ordering::Relaxed);
+        self.rooms.active.fetch_sub(1, Ordering::Relaxed);
     }
 
     fn on_cluster_publish(&self, bytes: usize) {
-        self.cluster_published.fetch_add(1, Ordering::Relaxed);
-        self.cluster_bytes_published
+        self.cluster.published.fetch_add(1, Ordering::Relaxed);
+        self.cluster
+            .bytes_published
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn on_cluster_received(&self, bytes: usize) {
-        self.cluster_received.fetch_add(1, Ordering::Relaxed);
-        self.cluster_bytes_received
+        self.cluster.received.fetch_add(1, Ordering::Relaxed);
+        self.cluster
+            .bytes_received
             .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn on_cluster_dropped(&self) {
+        self.cluster.dropped.fetch_add(1, Ordering::Relaxed);
     }
 }

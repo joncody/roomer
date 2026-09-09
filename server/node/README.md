@@ -5,7 +5,7 @@
 [![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=flat&logo=javascript&logoColor=black)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
-High-performance, functional Node.js server implementation of the Roomer WebSocket framework with zero-intermediate allocation binary framing, Crockfordian functional encapsulation, pluggable Redis cluster presence and unicast routing, and native libuv backpressure control.
+High-performance, functional Node.js server implementation of the Roomer WebSocket framework with zero-intermediate allocation binary framing, Crockfordian functional encapsulation, pluggable Redis cluster presence with heartbeat touching, true wire-level unicast routing, and native libuv backpressure control.
 
 > 📖 **For Wire Protocol specifications and Client API documentation, see the [Root README](../../README.md).**
 
@@ -34,16 +34,19 @@ The `server/node` package provides the backend coordinator (`create_hub`), conne
                                    |                   |
                +-------------------v-------------------v-----------+
                |        Pluggable Distributed Adapter (Redis)      |
-               |  - Binary Presence Sets (SADD/SREM/SMEMBERS)      |
-               |  - Targeted Unicast Routing (PublishDirect)       |
+               |  - Presence Sets (ZSET Heartbeat Touch on Pong)   |
+               |  - True Wire-Level Unicast (SUBSCRIBE prefix:node)|
                |  - Loopback-Suppressed Broadcast (PUBLISH)        |
                +---------------------------------------------------+
 ```
 
-- **Pure Functional Encapsulation**: Zero `class`, zero `this`, and zero prototype modification. Every component is built with closure-based factory functions returning frozen interfaces (`Object.freeze(self)`).
+- **Pure Functional Encapsulation**: Zero `class`, zero `this`, and zero prototype modification. Built with closure-based factory functions returning frozen interfaces (`Object.freeze(self)`).
+- **True Wire-Level Unicast**: Direct node messages route via dedicated `SUBSCRIBE prefix:node:<nodeID>` channels, preventing bystander cluster nodes from receiving or parsing direct traffic over the wire.
+- **Presence Heartbeat Touching**: WebSocket Pong frames refresh connection timestamps in Redis ZSET presence sets via batched pipelines every 54 seconds.
+- **Configurable Backpressure**: Choose between `DROP_SLOW_CLIENT` (default memory protection), `DROP_OLDEST`, and `DROP_NEWEST`.
+- **Zero Redis Memory Leaks**: Pure Pub/Sub routing keeps Redis completely stateless—no persistent stream radix trees, unread entry accumulation, or dead consumer groups.
 - **Single-Allocation Binary Framing**: Uses `Buffer.byteLength()` and in-place `buf.write()` to pack binary frames in a **single heap allocation** without intermediate buffer copies.
 - **Kernel-Level Stream Optimization**: Disables Nagle's algorithm (`setNoDelay(true)`) and disables redundant `ws` client tracking for minimal GC overhead.
-- **Ultra-High Throughput**: Capable of delivering **>260,000 messages/second** on a single Node.js process with 100% packet delivery.
 
 ---
 
@@ -63,7 +66,8 @@ npm install ioredis # Optional for multi-node clustering
 import http from "node:http";
 import {
     create_hub,
-    create_roomer_server
+    create_roomer_server,
+    BACKPRESSURE
 } from "./index.js";
 
 const hub = create_hub();
@@ -79,6 +83,8 @@ const server = http.createServer();
 create_roomer_server(server, {
     hub,
     channel_capacity: 2048,
+    backpressure: BACKPRESSURE.DROP_SLOW_CLIENT,
+    presence_touch_interval: 54000,
     max_message_size: 16 * 1024 * 1024
 });
 
@@ -104,7 +110,7 @@ server.listen(8080, function () {
 
 ## 🌐 Distributed Clustering (Redis Adapter)
 
-The Redis clustering adapter provides **loopback suppression**, **cluster presence synchronization**, and **$O(1)$ unicast direct routing** using binary buffer streaming (`publishBuffer` and `pmessageBuffer`):
+The Redis clustering adapter provides **loopback suppression**, **cluster presence synchronization with heartbeat touches**, and **wire-level isolated unicast routing** using binary buffer streaming (`publish` and `pmessageBuffer`/`messageBuffer`):
 
 ```javascript
 import http from "node:http";
@@ -119,7 +125,8 @@ const pub_client = new Redis("localhost:6379");
 const sub_client = pub_client.duplicate();
 
 const adapter = create_redis_adapter(pub_client, sub_client, {
-    prefix: "roomer:demo:"
+    prefix: "roomer:demo:",
+    presence_ttl: 180 // Prune inactive presence members after 3 minutes
 });
 
 const hub = create_hub();
@@ -143,9 +150,10 @@ server.listen(8080, function () {
 | `hub` | `create_hub()` | Custom Hub coordinator instance. |
 | `authorize` | `undefined` | Handshake function `async (req) => claims`. |
 | `max_message_size` | `16 MB` | Maximum allowed WebSocket frame size in bytes. |
-| `channel_capacity` | `2048` | Outbound message queue capacity (in KB) before backpressure activates. |
+| `channel_capacity` | `8192` | Outbound message queue capacity factor before backpressure activates. |
 | `backpressure` | `BACKPRESSURE.DROP_SLOW_CLIENT` | Backpressure policy: `DROP_SLOW_CLIENT`, `DROP_OLDEST`, `DROP_NEWEST`. |
 | `ping_interval` | `54000` (54s) | Keep-alive heartbeat ping interval in milliseconds. |
+| `presence_touch_interval` | `54000` (54s) | Minimum interval in ms between presence score updates on Pong frames. |
 
 ### `Conn` Instance Methods
 | Method | Description |
@@ -153,8 +161,9 @@ server.listen(8080, function () {
 | `conn.id` | Unique UUID string assigned to connection. |
 | `conn.claims` | Read-only object of authenticated claims extracted during handshake. |
 | `conn.send_to_room(room, event, payload)` | Broadcasts message to room members **except sender** (local + cluster). |
-| `conn.send_to_client(dst_id, event, payload)` | Sends direct message to client ID via $O(1)$ node unicast. |
+| `conn.send_to_client(dst_id, event, payload)` | Sends direct message to client ID via isolated node unicast. |
 | `conn.try_send(msg_buffer)` | Non-blocking frame transmission with backpressure policy. |
+| `conn.touch_presence(interval)` | Updates last-seen presence heartbeat score across joined rooms. |
 | `conn.is_in_room(room)` | Checks if connection is currently tracked in a room. |
 | `conn.joined_rooms()` | Returns an array copy of all joined room names. |
 | `conn.cleanup()` | Safely removes connection from all rooms and terminates socket. |
@@ -165,14 +174,15 @@ server.listen(8080, function () {
 | `hub.register_handler(event, fn)` | Registers a custom message handler callback. |
 | `hub.broadcast_room(exclude_id, msg)` | Broadcasts message to room members and cluster adapter. |
 | `hub.get_cluster_presence(room)` | Retrieves all connection IDs in a room across the cluster. |
-| `hub.send_direct_to_cluster(msg)` | Routes a direct message via $O(1)$ node unicast. |
+| `hub.send_direct_to_cluster(msg)` | Routes a direct message via isolated node unicast. |
+| `hub.touch_presence(conn_id, rooms)` | Touches cluster presence score for a connection across rooms. |
 | `hub.shutdown()` | Broadcasts `1001 Going Away` close frames and closes adapters. |
 
 ---
 
 ## 🧪 Testing & Benchmarks
 
-### 1. Run Unit Tests
+### 1. Run Unit Tests & Integration Tests
 ```bash
 npm test
 ```
@@ -183,20 +193,6 @@ npm start
 ```
 - **Interactive Chat Demo:** [http://localhost:8080/](http://localhost:8080/)
 - **Automated Browser Test Suite:** [http://localhost:8080/tests/](http://localhost:8080/tests/)
-
-### 3. Cluster Load Benchmark
-Execute the cross-language load testing tool against the running Node.js server:
-
-```bash
-go run ./server/go/cmd/loadtest/main.go -node1=ws://localhost:8080/ws -node2=ws://localhost:8080/ws -clients=50 -messages=1000
-```
-
-```text
-CLUSTER LOAD TEST RESULTS:
-Total Elapsed Time:   378.22ms
-Total Receives:       99000 / 99000 (100.00%)
-Throughput:           261,751.59 messages delivered/sec
-```
 
 ---
 

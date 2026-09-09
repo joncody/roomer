@@ -46,21 +46,22 @@ type MessageHandler func(c *Conn, msg *Message) error
 
 // Config holds configuration options for WebSocket connections and upgrader.
 type Config struct {
-	Hub             *Hub
-	Authorize       Authorize
-	RoomAuthorize   RoomAuthorize
-	MaxMessageSize  int64
-	WriteWait       time.Duration
-	PongWait        time.Duration
-	PingPeriod      time.Duration
-	ChannelCapacity int
-	ReadBufferSize  int
-	WriteBufferSize int
-	CheckOrigin     func(r *http.Request) bool
-	Logger          *slog.Logger
-	Metrics         Metrics
-	Adapter         Adapter
-	Backpressure    BackpressureStrategy
+	Hub                   *Hub
+	Authorize             Authorize
+	RoomAuthorize         RoomAuthorize
+	MaxMessageSize        int64
+	WriteWait             time.Duration
+	PongWait              time.Duration
+	PingPeriod            time.Duration
+	ChannelCapacity       int
+	ReadBufferSize        int
+	WriteBufferSize       int
+	CheckOrigin           func(r *http.Request) bool
+	Logger                *slog.Logger
+	Metrics               Metrics
+	Adapter               Adapter
+	Backpressure          BackpressureStrategy
+	PresenceTouchInterval time.Duration
 }
 
 // Option sets a configuration option for roomer WebSocket handling.
@@ -69,19 +70,20 @@ type Option func(*Config)
 // DefaultConfig returns a Config with production-grade default settings.
 func DefaultConfig() Config {
 	return Config{
-		Hub:             defaultHub,
-		MaxMessageSize:  16 * 1024 * 1024,
-		WriteWait:       10 * time.Second,
-		PongWait:        60 * time.Second,
-		PingPeriod:      54 * time.Second,
-		ChannelCapacity: 2048,
-		ReadBufferSize:  4096,
-		WriteBufferSize: 4096,
-		CheckOrigin:     nil, // gorilla/websocket enforces same-origin by default
-		Logger:          slog.Default(),
-		Metrics:         NopMetrics{},
-		Adapter:         newLocalAdapter(),
-		Backpressure:    DropSlowClient,
+		Hub:                   defaultHub,
+		MaxMessageSize:        16 * 1024 * 1024,
+		WriteWait:             10 * time.Second,
+		PongWait:              60 * time.Second,
+		PingPeriod:            54 * time.Second,
+		ChannelCapacity:       2048,
+		ReadBufferSize:        4096,
+		WriteBufferSize:       4096,
+		CheckOrigin:           nil, // gorilla/websocket enforces same-origin by default
+		Logger:                slog.Default(),
+		Metrics:               NopMetrics{},
+		Adapter:               newLocalAdapter(),
+		Backpressure:          DropSlowClient,
+		PresenceTouchInterval: 54 * time.Second,
 	}
 }
 
@@ -206,6 +208,15 @@ func WithAdapter(adapter Adapter) Option {
 func WithBackpressureStrategy(strategy BackpressureStrategy) Option {
 	return func(c *Config) {
 		c.Backpressure = strategy
+	}
+}
+
+// WithPresenceTouchInterval sets the minimum interval between presence heartbeat score touches.
+func WithPresenceTouchInterval(d time.Duration) Option {
+	return func(c *Config) {
+		if d > 0 {
+			c.PresenceTouchInterval = d
+		}
 	}
 }
 

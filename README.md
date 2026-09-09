@@ -5,13 +5,13 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev/)
 [![Rust](https://img.shields.io/badge/Rust-1.88+_(2024)-DEA584?style=flat&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-26+-339933?style=flat&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-22+-339933?style=flat&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![WebSocket](https://img.shields.io/badge/WebSocket-Binary%20Framing-010101?style=flat&logo=socketdotio&logoColor=white)](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
 [![Formal Verification: TLA+](https://img.shields.io/badge/Formal%20Verification-TLA%2B-555555?style=flat)](./spec/roomer.tla)
 [![Client Dependencies: 0](https://img.shields.io/badge/Client%20Deps-0-brightgreen.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-Roomer is a high-throughput, room-based WebSocket framework engineered with zero client runtime dependencies, zero-copy binary framing, multi-node horizontal clustering (Redis Pub/Sub with $O(1)$ unicast direct routing and cluster-wide presence synchronization), and mathematically verified state invariants (TLA+).
+Roomer is a high-throughput, room-based WebSocket framework engineered with zero client runtime dependencies, zero-copy binary framing, multi-node horizontal clustering (Redis Pub/Sub with wire-level isolated $O(1)$ unicast routing and cluster-wide presence synchronization), and mathematically verified state invariants (TLA+).
 
 ---
 
@@ -21,9 +21,9 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 |---|---|
 | **`client/`** | Zero-dependency JavaScript / TypeScript client (`roomer.js`, `bytecursor.js`, `emitter.js`). Provides Crockfordian functional encapsulation, binary framing, and exponential reconnection. |
 | **`client/python/`** | Asynchronous Python client SDK (`roomer.py`, `pyproject.toml`). Built for `asyncio` with native binary packing, event emitters, and context managers. |
-| **`server/go/`** | Production Go server implementation (Go 1.26+, 32-shard FNV-1a lock striping, configurable backpressure, Redis adapter). |
-| **`server/rust/`** | Production Rust server implementation (Rust 1.88+ / Edition 2024, Axum 0.8, Tokio, `DashMap` concurrency, zero-copy `bytes::Bytes` framing). |
-| **`server/node/`** | Production Node.js server implementation (Node 24+, Crockfordian functional encapsulation, single-allocation binary framing, Redis adapter). |
+| **`server/go/`** | Production Go server implementation (Go 1.26+, 32-shard FNV-1a lock striping with 64B cache line padding, configurable backpressure, Redis adapter). |
+| **`server/rust/`** | Production Rust server implementation (Rust 1.88+ / Edition 2024, Axum 0.8, Tokio, `DashMap` concurrency with 64B cache alignment, zero-copy `bytes::Bytes` framing). |
+| **`server/node/`** | Production Node.js server implementation (Node 22+, Crockfordian functional encapsulation, single-allocation binary framing, Redis adapter). |
 | **`spec/`** | Formal TLA+ specification (`roomer.tla`, `roomer.cfg`) verifying safety invariants and room membership state machines. |
 | **`examples/`** | Unified cross-platform HTML/JS frontend demonstration and interactive room client. |
 | **`tests/`** | Automated browser-based test suite verifying packet encoding, event emission, exception filtering, and teardown. |
@@ -35,11 +35,12 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 - **Zero-Copy Binary Wire Framing**: Every packet is packed into 5 big-endian, length-prefixed fields with only 20 bytes of header overhead.
 - **Triple Server Parity**: Go, Rust, and Node.js implementations share the exact binary wire protocol, Redis envelope format, and loopback suppression contract.
 - **Dual Client Ecosystem**: Native client SDKs in JavaScript/TypeScript (Browser, Node, Bun, Deno) and Python (`asyncio`).
-- **Horizontal Scaling with $O(1)$ Unicast Routing**: Cluster nodes publish broadcasts to room channels while routing direct point-to-point messages directly to the target host node.
-- **Cluster-Wide Presence Synchronization**: Distributed presence sets guarantee `join_ack` snapshots return every active room member across all nodes in the cluster.
+- **False Sharing Elimination**: Shards and metrics structs are padded and aligned to 64-byte L1/L2 CPU cache lines (in Go and Rust) to prevent cross-core cache invalidations.
+- **True Wire-Level Unicast Routing**: Cluster nodes publish broadcasts to `prefix:room:*` channels while direct point-to-point frames travel over dedicated `prefix:node:<nodeID>` channels, preventing bystander nodes from receiving unicast traffic over the wire.
+- **Cluster-Wide Presence with Heartbeat Touching**: Distributed ZSET presence sets update connection timestamps on WebSocket Pong frames and automatically evict dead connections via TTL pruning.
 - **Configurable Backpressure Policies**: Supports `DropSlowClient` (default memory protection), `DropOldest` (queue eviction), and `DropNewest` buffer management.
 - **Formally Verified (TLA+)**: Proven state invariants prevent disconnected zombie members and buffer leaks.
-- **Ultra-High Throughput**: Capable of delivering **>1.4 million messages/second** in Go/Rust and **>326,000 messages/second** in Node.js clustered deployments with sub-millisecond fanout latency.
+- **Ultra-High Throughput**: Capable of delivering **>2.6 million messages/second** in Go/Rust and **>260,000 messages/second** in Node.js clustered deployments with sub-millisecond fanout latency.
 
 ---
 
@@ -84,25 +85,25 @@ sequenceDiagram
     participant Node2 as Roomer Node 2
     actor ClientB as Client B (Node 2)
 
-    Note over Node1,Node2: 1. Cluster-Wide Presence Sync
+    Note over Node1,Node2: 1. Cluster-Wide Presence Sync (ZSET with Heartbeats)
     ClientA->>Node1: Join "lobby"
-    Node1->>Redis: SADD roomer:demo:presence:lobby ClientA_UUID
-    Node1->>Redis: SETEX roomer:demo:conn_node:ClientA_UUID -> Node1_ID
+    Node1->>Redis: ZADD roomer:demo:presence:lobby <timestamp> ClientA_UUID
+    Node1->>Redis: SET roomer:demo:conn_node:ClientA_UUID -> Node1_ID (EX 86400)
     Node1-->>ClientA: join_ack [Cluster Presence Snapshot]
 
     Note over Node1,Node2: 2. Broadcast with Loopback Suppression
     ClientA->>Node1: Broadcast Frame (room: lobby, event: chat)
     Node1->>ClientA: Local delivery (except sender)
-    Node1->>Redis: PUBLISH roomer:demo:lobby [Envelope: Node1_UUID + Packet]
+    Node1->>Redis: PUBLISH roomer:demo:room:lobby [Envelope: Node1_UUID + Packet]
     Redis-->>Node1: Envelope received (Self-Echo) -> 🚫 Suppressed
     Redis-->>Node2: Envelope received -> ✅ Decoded & Delivered to Client B
     Node2->>ClientB: Binary Frame delivered
 
-    Note over Node1,Node2: 3. Targeted O(1) Direct Unicast Routing
+    Note over Node1,Node2: 3. Targeted True Wire-Level Unicast Routing
     ClientA->>Node1: Direct Message to ClientB (dst: ClientB_UUID)
     Node1->>Redis: GET roomer:demo:conn_node:ClientB_UUID -> "Node2_ID"
     Node1->>Redis: PUBLISH roomer:demo:node:Node2_ID [Envelope + Packet]
-    Redis-->>Node2: Delivered exclusively to Node 2 (No cluster broadcast)
+    Redis-->>Node2: Delivered exclusively to Node 2 (Bystanders receive 0 bytes)
     Node2->>ClientB: Direct Message delivered
 ```
 
@@ -192,9 +193,9 @@ if __name__ == "__main__":
 
 | Server | Documentation | Concurrency Engine | Clustering Engine |
 |---|---|---|---|
-| **Go** | [`server/go/README.md`](./server/go/README.md) | Go 1.26, 32-Shard FNV-1a Lock Striping, Channels | `go-redis/v9` UniversalClient |
-| **Rust** | [`server/rust/README.md`](./server/rust/README.md) | Rust 1.88 (2024), Axum 0.8, Tokio, `DashMap` | `redis 0.27` Tokio Connection Multiplexer |
-| **Node.js** | [`server/node/README.md`](./server/node/README.md) | Node 24+, Functional Closures, `ws`, Libuv Stream Backpressure | `ioredis 5.4` Pub/Sub & Presence Registry |
+| **Go** | [`server/go/README.md`](./server/go/README.md) | Go 1.26, 32-Shard FNV-1a Lock Striping with 64B Padding, Channels | `go-redis/v9` UniversalClient |
+| **Rust** | [`server/rust/README.md`](./server/rust/README.md) | Rust 1.88 (2024), Axum 0.8, Tokio, `DashMap` with 64B Cache Alignment | `redis 0.27` Tokio Connection Multiplexer |
+| **Node.js** | [`server/node/README.md`](./server/node/README.md) | Node 22+, Functional Closures, `ws`, Libuv Stream Backpressure | `ioredis 5.4` Pub/Sub & Presence Registry |
 
 ---
 
@@ -223,6 +224,9 @@ docker compose -f server/go/docker-compose.yml up --build -d
 
 # Run cluster load test (1,000 broadcasts across 100 clients)
 go run ./server/go/cmd/loadtest/main.go -node1=ws://localhost:8080/ws -node2=ws://localhost:8081/ws
+
+# Stress test (2,000 broadcasts across 400 clients)
+go run ./server/go/cmd/loadtest/main.go -clients=200 -messages=2000
 
 # Tear down cluster
 docker compose -f server/node/docker-compose.yml down

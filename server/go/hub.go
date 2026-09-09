@@ -10,14 +10,20 @@ import (
 
 const shardCount = 32
 
+// connShard manages connections partitioned by FNV-1a hash.
+// Padded to 64 bytes to eliminate false sharing across adjacent CPU cache lines.
 type connShard struct {
 	mu    sync.RWMutex
 	conns map[string]*Conn
+	_     [32]byte
 }
 
+// roomShard manages rooms partitioned by FNV-1a hash.
+// Padded to 64 bytes to eliminate false sharing across adjacent CPU cache lines.
 type roomShard struct {
 	mu    sync.RWMutex
 	rooms map[string]*room
+	_     [32]byte
 }
 
 // Hub manages all rooms and connections via lock-striped shards and distributed adapters.
@@ -87,8 +93,9 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 				return
 			}
 
-			// Local room fanout
-			if r, ok := h.getRoom(channelSuffix); ok {
+			// Local room fanout (trimming any internal room prefix)
+			roomName := strings.TrimPrefix(channelSuffix, "room:")
+			if r, ok := h.getRoom(roomName); ok {
 				r.emitLocal(msg)
 			}
 		})
@@ -257,6 +264,21 @@ func (h *Hub) leaveRoom(name string, c *Conn) {
 func (h *Hub) leaveAllRooms(c *Conn) {
 	for _, name := range c.joinedRooms() {
 		h.leaveRoom(name, c)
+	}
+}
+
+// touchPresence updates the presence heartbeat score for a connection in its joined rooms asynchronously.
+func (h *Hub) touchPresence(connID string, rooms []string) {
+	h.cfgMu.RLock()
+	adapter := h.adapter
+	h.cfgMu.RUnlock()
+
+	if adapter != nil && len(rooms) > 0 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = adapter.TouchPresence(ctx, connID, rooms)
+		}()
 	}
 }
 

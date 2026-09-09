@@ -68,8 +68,13 @@ function create_hub(options) {
                     }
                 }
 
-                // Local room fanout
-                const room = rooms[channel_suffix];
+                // Local room fanout (trimming any internal room prefix)
+                const room_name = (
+                    channel_suffix.startsWith("room:") === true
+                    ? channel_suffix.slice(5)
+                    : channel_suffix
+                );
+                const room = rooms[room_name];
                 if (room !== undefined) {
                     room.emit_local(null, raw_frame);
                 }
@@ -158,6 +163,14 @@ function create_hub(options) {
         conn.joined_rooms().forEach(function (room_name) {
             leave_room(room_name, conn);
         });
+    }
+
+    function touch_presence(conn_id, rooms_list) {
+        if (Array.isArray(rooms_list) === true && rooms_list.length > 0) {
+            if (typeof adapter.touch_presence === "function") {
+                adapter.touch_presence(conn_id, rooms_list).catch(function () {});
+            }
+        }
     }
 
     async function get_cluster_presence(room_name) {
@@ -284,7 +297,8 @@ function create_hub(options) {
         register_handler,
         remove_conn,
         send_direct_to_cluster,
-        shutdown
+        shutdown,
+        touch_presence
     });
 
     // Auto-subscribe if an adapter was passed directly

@@ -33,6 +33,8 @@ pub struct ServerConfig {
     pub channel_capacity: usize,
     /// Buffer saturation policy.
     pub backpressure: BackpressureStrategy,
+    /// Minimum interval between cluster presence heartbeat score touches.
+    pub presence_touch_interval: Duration,
 }
 
 impl Default for ServerConfig {
@@ -43,6 +45,7 @@ impl Default for ServerConfig {
             pong_timeout: Duration::from_secs(60),
             channel_capacity: 2048,
             backpressure: BackpressureStrategy::default(),
+            presence_touch_interval: Duration::from_secs(54),
         }
     }
 }
@@ -86,6 +89,13 @@ impl ServerConfig {
     #[must_use]
     pub fn with_backpressure(mut self, strategy: BackpressureStrategy) -> Self {
         self.backpressure = strategy;
+        self
+    }
+
+    /// Sets minimum interval between presence heartbeat score touches.
+    #[must_use]
+    pub fn with_presence_touch_interval(mut self, interval: Duration) -> Self {
+        self.presence_touch_interval = interval;
         self
     }
 }
@@ -209,7 +219,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                     loop {
                         match current {
                             OutboundMessage::Binary(msg_bytes) => {
-                                // Feed into buffer without triggering immediate TCP flush syscall
                                 if ws_sender.feed(ws::Message::Binary(msg_bytes)).await.is_err() {
                                     return;
                                 }
@@ -228,14 +237,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                             break;
                         }
 
-                        // Opportunistically batch queued burst frames before flushing TCP socket
                         match send_rx.try_recv() {
                             Ok(next_msg) => current = next_msg,
                             Err(_) => break,
                         }
                     }
 
-                    // Single coalesced TCP flush for the entire batch
                     if ws_sender.flush().await.is_err() {
                         return;
                     }
@@ -299,6 +306,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                         .duration_since(start_instant)
                         .as_millis() as u64;
                     last_activity_reader.store(elapsed, Ordering::Relaxed);
+                    conn_for_reader.touch_presence(&hub, state.config.presence_touch_interval);
                 }
                 _ => {}
             }

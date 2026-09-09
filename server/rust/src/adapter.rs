@@ -49,6 +49,12 @@ pub trait Adapter: Send + Sync + 'static {
     /// Retrieves all connection IDs in a room across the entire cluster.
     async fn get_presence(&self, room: &str) -> Result<Vec<String>, AdapterError>;
 
+    /// Updates the last-seen heartbeat timestamp for a connection across the specified rooms.
+    async fn touch_presence(&self, conn_id: &str, rooms: &[String]) -> Result<(), AdapterError> {
+        let _ = (conn_id, rooms);
+        Ok(())
+    }
+
     /// Maps a connection ID to this node ID in the cluster registry.
     async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError>;
 
@@ -117,6 +123,9 @@ impl Adapter for LocalAdapter {
             .map(|set| set.iter().map(|k| k.clone()).collect())
             .unwrap_or_default())
     }
+    async fn touch_presence(&self, _conn_id: &str, _rooms: &[String]) -> Result<(), AdapterError> {
+        Ok(())
+    }
     async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError> {
         self.node_map
             .insert(conn_id.to_string(), "local-node".into());
@@ -159,6 +168,7 @@ pub mod redis {
         redis_url: String,
         prefix: String,
         publish_timeout: Duration,
+        presence_ttl: Duration,
         node_id: Option<String>,
     }
 
@@ -169,6 +179,7 @@ pub mod redis {
                 redis_url: redis_url.into(),
                 prefix: "roomer:demo:".into(),
                 publish_timeout: Duration::from_secs(5),
+                presence_ttl: Duration::from_secs(86400),
                 node_id: None,
             }
         }
@@ -186,6 +197,12 @@ pub mod redis {
         /// Sets timeout duration for PUBLISH commands.
         pub fn publish_timeout(mut self, timeout: Duration) -> Self {
             self.publish_timeout = timeout;
+            self
+        }
+
+        /// Sets the expiration threshold for inactive presence entries (default: 24h).
+        pub fn presence_ttl(mut self, ttl: Duration) -> Self {
+            self.presence_ttl = ttl;
             self
         }
 
@@ -214,6 +231,7 @@ pub mod redis {
                 node_id,
                 prefix: self.prefix,
                 publish_timeout: self.publish_timeout,
+                presence_ttl: self.presence_ttl,
                 multiplexed_conn: Arc::new(RwLock::new(None)),
                 shutdown_tx: tokio::sync::Mutex::new(None),
             })
@@ -226,6 +244,7 @@ pub mod redis {
         node_id: String,
         prefix: String,
         publish_timeout: Duration,
+        presence_ttl: Duration,
         multiplexed_conn: Arc<RwLock<Option<::redis::aio::MultiplexedConnection>>>,
         shutdown_tx: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
     }
@@ -308,7 +327,7 @@ pub mod redis {
 
         async fn publish_raw(&self, room: &str, raw_msg: &[u8]) -> Result<(), AdapterError> {
             let mut conn = self.get_publish_conn().await?;
-            let channel = format!("{}{}", self.prefix, room);
+            let channel = format!("{}room:{}", self.prefix, room);
             let payload = Self::encode_envelope(&self.node_id, raw_msg);
 
             let mut cmd = ::redis::cmd("PUBLISH");
@@ -392,7 +411,7 @@ pub mod redis {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let min_score = now.saturating_sub(86400);
+            let min_score = now.saturating_sub(self.presence_ttl.as_secs());
 
             let _prune: Result<i64, _> = ::redis::cmd("ZREMRANGEBYSCORE")
                 .arg(&key)
@@ -409,6 +428,28 @@ pub mod redis {
                 .await
                 .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
             Ok(members)
+        }
+
+        async fn touch_presence(&self, conn_id: &str, rooms: &[String]) -> Result<(), AdapterError> {
+            if rooms.is_empty() {
+                return Ok(());
+            }
+            let mut conn = self.get_publish_conn().await?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let mut pipe = ::redis::pipe();
+            for room in rooms {
+                let key = format!("{}presence:{}", self.prefix, room);
+                pipe.cmd("ZADD").arg(&key).arg(now).arg(conn_id).ignore();
+            }
+            let () = pipe
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+            Ok(())
         }
 
         async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError> {
@@ -454,7 +495,8 @@ pub mod redis {
             let client = self.client.clone();
             let prefix = self.prefix.clone();
             let node_id = self.node_id.clone();
-            let pattern = format!("{}*", prefix);
+            let room_pattern = format!("{}room:*", prefix);
+            let node_channel = format!("{}node:{}", prefix, node_id);
 
             let mut pubsub_conn = client
                 .get_async_pubsub()
@@ -462,11 +504,21 @@ pub mod redis {
                 .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
 
             pubsub_conn
-                .psubscribe(&pattern)
+                .psubscribe(&room_pattern)
                 .await
                 .map_err(|e| AdapterError::SubscribeFailed(e.to_string()))?;
 
-            info!(node_id = %node_id, pattern = %pattern, "Successfully subscribed to Redis cluster pattern");
+            pubsub_conn
+                .subscribe(&node_channel)
+                .await
+                .map_err(|e| AdapterError::SubscribeFailed(e.to_string()))?;
+
+            info!(
+                node_id = %node_id,
+                room_pattern = %room_pattern,
+                node_channel = %node_channel,
+                "Successfully subscribed to Redis room pattern and dedicated node unicast channel"
+            );
 
             tokio::spawn(async move {
                 let mut stream = pubsub_conn.into_on_message();
@@ -489,7 +541,8 @@ pub mod redis {
 
                                             let channel_name = msg.get_channel_name();
                                             let channel_suffix = channel_name.strip_prefix(&prefix).unwrap_or(channel_name);
-                                            callback(channel_suffix, &sender_node, raw_data);
+                                            let clean_suffix = channel_suffix.strip_prefix("room:").unwrap_or(channel_suffix);
+                                            callback(clean_suffix, &sender_node, raw_data);
                                         }
                                     }
                                     None => {
@@ -511,15 +564,20 @@ pub mod redis {
                             _ = tokio::time::sleep(backoff) => {
                                 match client.get_async_pubsub().await {
                                     Ok(mut new_pubsub) => {
-                                        match new_pubsub.psubscribe(&pattern).await {
-                                            Ok(()) => {
-                                                info!(node_id = %node_id, pattern = %pattern, "Successfully reconnected and re-subscribed to Redis cluster");
-                                                stream = new_pubsub.into_on_message();
-                                                continue 'outer;
-                                            }
-                                            Err(err) => {
-                                                warn!(error = %err, "Failed to re-subscribe to Redis pattern, retrying...");
-                                            }
+                                        let psub_res = new_pubsub.psubscribe(&room_pattern).await;
+                                        let sub_res = new_pubsub.subscribe(&node_channel).await;
+
+                                        if psub_res.is_ok() && sub_res.is_ok() {
+                                            info!(
+                                                node_id = %node_id,
+                                                room_pattern = %room_pattern,
+                                                node_channel = %node_channel,
+                                                "Successfully reconnected and re-subscribed to Redis cluster"
+                                            );
+                                            stream = new_pubsub.into_on_message();
+                                            continue 'outer;
+                                        } else {
+                                            warn!("Failed to re-subscribe to Redis patterns, retrying...");
                                         }
                                     }
                                     Err(err) => {

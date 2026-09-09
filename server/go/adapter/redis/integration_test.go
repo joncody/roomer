@@ -113,6 +113,90 @@ func TestLiveRedis_TwoNodeClusterSyncAndSuppression(t *testing.T) {
 	}
 }
 
+func TestLiveRedis_TrueWireLevelUnicast(t *testing.T) {
+	rdb := getRedisClient(t)
+	defer rdb.Close()
+
+	prefix := fmt.Sprintf("roomer:unicast:%d:", time.Now().UnixNano())
+
+	// Initialize 3 nodes: Sender, Target, and Bystander
+	nodeSender, _ := redisadapter.New(rdb, redisadapter.WithPrefix(prefix), redisadapter.WithNodeID("node_sender"))
+	nodeTarget, _ := redisadapter.New(rdb, redisadapter.WithPrefix(prefix), redisadapter.WithNodeID("node_target"))
+	nodeBystander, _ := redisadapter.New(rdb, redisadapter.WithPrefix(prefix), redisadapter.WithNodeID("node_bystander"))
+	defer nodeSender.Close()
+	defer nodeTarget.Close()
+	defer nodeBystander.Close()
+
+	var targetReceived int64
+	var bystanderReceived int64
+
+	_ = nodeTarget.Subscribe(func(channel string, msg *roomer.Message) {
+		atomic.AddInt64(&targetReceived, 1)
+	})
+	_ = nodeBystander.Subscribe(func(channel string, msg *roomer.Message) {
+		atomic.AddInt64(&bystanderReceived, 1)
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	ctx := context.Background()
+	directMsg := roomer.NewMessage("root", "unicast_event", "client_dst", "client_src", []byte("secret payload"))
+	if err := nodeSender.PublishDirect(ctx, "node_target", directMsg); err != nil {
+		t.Fatalf("PublishDirect failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt64(&targetReceived) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Target received exactly 1 direct message
+	if atomic.LoadInt64(&targetReceived) != 1 {
+		t.Errorf("Target node expected 1 message, got %d", atomic.LoadInt64(&targetReceived))
+	}
+
+	// Bystander received 0 messages (wire-level unicast isolation verified)
+	if atomic.LoadInt64(&bystanderReceived) != 0 {
+		t.Errorf("Bystander received direct message: wire-level unicast failed, got %d", atomic.LoadInt64(&bystanderReceived))
+	}
+}
+
+func TestLiveRedis_PresenceHeartbeatTouch(t *testing.T) {
+	rdb := getRedisClient(t)
+	defer rdb.Close()
+
+	prefix := fmt.Sprintf("roomer:touchtest:%d:", time.Now().UnixNano())
+	adapter, err := redisadapter.New(rdb, redisadapter.WithPrefix(prefix))
+	if err != nil {
+		t.Fatalf("failed to create adapter: %v", err)
+	}
+	defer adapter.Close()
+
+	ctx := context.Background()
+	room := "heartbeat_room"
+	connID := "client_heartbeat_1"
+
+	_ = adapter.AddPresence(ctx, room, connID)
+	pres1, _ := adapter.GetPresence(ctx, room)
+	if len(pres1) != 1 || pres1[0] != connID {
+		t.Fatalf("expected presence with %s, got %v", connID, pres1)
+	}
+
+	// Touch presence across multiple rooms in a single pipeline
+	err = adapter.TouchPresence(ctx, connID, []string{room, "room_two"})
+	if err != nil {
+		t.Fatalf("TouchPresence failed: %v", err)
+	}
+
+	pres2, _ := adapter.GetPresence(ctx, "room_two")
+	if len(pres2) != 1 || pres2[0] != connID {
+		t.Errorf("expected room_two to record presence touch for %s, got %v", connID, pres2)
+	}
+}
+
 func BenchmarkLiveRedis_PubSubThroughput(b *testing.B) {
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {

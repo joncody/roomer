@@ -5,6 +5,8 @@ use bytes::Bytes;
 use dashmap::DashSet;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Backpressure policy when outbound connection queue is saturated.
@@ -42,6 +44,7 @@ pub struct Conn {
     pub metrics: DynMetrics,
     /// Buffer saturation policy.
     pub backpressure: BackpressureStrategy,
+    last_touch_ms: AtomicU64,
 }
 
 impl Conn {
@@ -71,6 +74,11 @@ impl Conn {
         metrics: DynMetrics,
         backpressure: BackpressureStrategy,
     ) -> Arc<Self> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
         Arc::new(Self {
             id,
             claims,
@@ -78,6 +86,7 @@ impl Conn {
             rooms: DashSet::new(),
             metrics,
             backpressure,
+            last_touch_ms: AtomicU64::new(now_ms),
         })
     }
 
@@ -125,6 +134,31 @@ impl Conn {
             dst.try_send(msg.encode());
         } else {
             hub.send_direct_to_cluster(msg);
+        }
+    }
+
+    /// Touches cluster presence timestamp for all joined rooms if the configured interval has elapsed.
+    pub fn touch_presence(&self, hub: &Hub, interval: Duration) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let interval_ms = interval.as_millis() as u64;
+
+        let prev = self.last_touch_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(prev) < interval_ms {
+            return;
+        }
+
+        if self
+            .last_touch_ms
+            .compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let rooms = self.joined_rooms();
+            if !rooms.is_empty() {
+                hub.touch_presence(&self.id, rooms);
+            }
         }
     }
 

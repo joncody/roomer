@@ -26,6 +26,7 @@ type Adapter struct {
 	prefix         string
 	logger         *slog.Logger
 	publishTimeout time.Duration
+	presenceTTL    time.Duration
 	ownsClient     bool
 
 	subMu     sync.Mutex
@@ -80,6 +81,15 @@ func WithPublishTimeout(d time.Duration) Option {
 	}
 }
 
+// WithPresenceTTL sets the expiration threshold for inactive presence entries.
+func WithPresenceTTL(d time.Duration) Option {
+	return func(a *Adapter) {
+		if d > 0 {
+			a.presenceTTL = d
+		}
+	}
+}
+
 // New creates a new Redis clustering adapter from any go-redis UniversalClient.
 func New(client goredis.UniversalClient, opts ...Option) (*Adapter, error) {
 	if client == nil {
@@ -96,6 +106,7 @@ func New(client goredis.UniversalClient, opts ...Option) (*Adapter, error) {
 		prefix:         "roomer:demo:",
 		logger:         slog.Default(),
 		publishTimeout: 5 * time.Second,
+		presenceTTL:    24 * time.Hour,
 		subCtx:         ctx,
 		subCancel:      cancel,
 		ownsClient:     false,
@@ -161,7 +172,7 @@ func (a *Adapter) Publish(ctx context.Context, room string, msg *roomer.Message)
 		return errors.New("cannot publish nil message")
 	}
 
-	channel := a.prefix + room
+	channel := a.prefix + "room:" + room
 	rawMsg := msg.Bytes()
 	envelope := EncodeEnvelope(a.nodeID, rawMsg)
 
@@ -217,17 +228,36 @@ func (a *Adapter) RemovePresence(ctx context.Context, room, connID string) error
 	return a.client.ZRem(ctx, key, connID).Err()
 }
 
-// GetPresence retrieves all connection IDs in a room across the cluster, pruning expired entries older than 24h.
+// GetPresence retrieves all connection IDs in a room across the cluster, pruning expired entries.
 func (a *Adapter) GetPresence(ctx context.Context, room string) ([]string, error) {
 	key := a.prefix + "presence:" + room
 	now := time.Now().Unix()
-	minScore := fmt.Sprintf("%d", now-86400)
+	ttl := a.presenceTTL
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
+	minScore := fmt.Sprintf("%d", now-int64(ttl.Seconds()))
 
 	_ = a.client.ZRemRangeByScore(ctx, key, "-inf", minScore).Err()
 	return a.client.ZRangeByScore(ctx, key, &goredis.ZRangeBy{
 		Min: minScore,
 		Max: "+inf",
 	}).Result()
+}
+
+// TouchPresence updates the last-seen heartbeat timestamp for a connection across rooms in a single pipeline.
+func (a *Adapter) TouchPresence(ctx context.Context, connID string, rooms []string) error {
+	if len(rooms) == 0 {
+		return nil
+	}
+	now := float64(time.Now().Unix())
+	pipe := a.client.Pipeline()
+	for _, room := range rooms {
+		key := a.prefix + "presence:" + room
+		pipe.ZAdd(ctx, key, goredis.Z{Score: now, Member: connID})
+	}
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 // RegisterNode maps a connection ID to this node ID with a 24-hour expiration.
@@ -252,8 +282,8 @@ func (a *Adapter) GetNodeForConn(ctx context.Context, connID string) (string, er
 	return val, err
 }
 
-// Subscribe listens to all room and node channels matching the prefix (e.g. "roomer:demo:*")
-// with automatic exponential backoff and jittered reconnects.
+// Subscribe listens to room broadcast channels (PSUBSCRIBE prefix:room:*) and a dedicated
+// unicast channel (SUBSCRIBE prefix:node:<nodeID>) providing true wire-level unicast isolation.
 func (a *Adapter) Subscribe(handler func(channel string, msg *roomer.Message)) error {
 	if handler == nil {
 		return errors.New("subscriber handler cannot be nil")
@@ -269,16 +299,22 @@ func (a *Adapter) Subscribe(handler func(channel string, msg *roomer.Message)) e
 		return errors.New("subscribe can only be called once")
 	}
 
-	pattern := a.prefix + "*"
-	pubsub := a.client.PSubscribe(a.subCtx, pattern)
+	roomPattern := a.prefix + "room:*"
+	nodeChannel := a.prefix + "node:" + a.nodeID
 
-	// Wait for subscription confirmation with timeout
+	pubsub := a.client.PSubscribe(a.subCtx, roomPattern)
+
 	initCtx, cancel := context.WithTimeout(a.subCtx, 5*time.Second)
 	defer cancel()
 
 	if _, err := pubsub.Receive(initCtx); err != nil {
 		_ = pubsub.Close()
-		return fmt.Errorf("failed to register redis psubscribe: %w", err)
+		return fmt.Errorf("failed to register redis psubscribe for %s: %w", roomPattern, err)
+	}
+
+	if err := pubsub.Subscribe(initCtx, nodeChannel); err != nil {
+		_ = pubsub.Close()
+		return fmt.Errorf("failed to register redis subscribe for %s: %w", nodeChannel, err)
 	}
 
 	a.pubsub = pubsub
@@ -290,7 +326,8 @@ func (a *Adapter) Subscribe(handler func(channel string, msg *roomer.Message)) e
 
 func (a *Adapter) listenLoop(handler func(channel string, msg *roomer.Message)) {
 	defer a.subWg.Done()
-	pattern := a.prefix + "*"
+	roomPattern := a.prefix + "room:*"
+	nodeChannel := a.prefix + "node:" + a.nodeID
 
 	for {
 		a.subMu.Lock()
@@ -344,16 +381,22 @@ func (a *Adapter) listenLoop(handler func(channel string, msg *roomer.Message)) 
 					_ = a.pubsub.Close()
 				}
 
-				newPubSub := a.client.PSubscribe(a.subCtx, pattern)
+				newPubSub := a.client.PSubscribe(a.subCtx, roomPattern)
 				initCtx, cancel := context.WithTimeout(a.subCtx, 5*time.Second)
 				_, err := newPubSub.Receive(initCtx)
+				if err == nil {
+					err = newPubSub.Subscribe(initCtx, nodeChannel)
+				}
 				cancel()
 
 				if err == nil {
 					a.pubsub = newPubSub
 					a.subMu.Unlock()
 					if a.logger != nil {
-						a.logger.Info("Successfully reconnected and re-subscribed to Redis cluster", "pattern", pattern)
+						a.logger.Info("Successfully reconnected and re-subscribed to Redis cluster",
+							"room_pattern", roomPattern,
+							"node_channel", nodeChannel,
+						)
 					}
 					goto StreamActive
 				}
@@ -400,6 +443,9 @@ func (a *Adapter) handleIncoming(m *goredis.Message, handler func(channel string
 	}
 
 	channelSuffix := strings.TrimPrefix(m.Channel, a.prefix)
+	if strings.HasPrefix(channelSuffix, "room:") {
+		channelSuffix = strings.TrimPrefix(channelSuffix, "room:")
+	}
 	handler(channelSuffix, packet)
 }
 

@@ -24,6 +24,8 @@ type Conn struct {
 	roomsMu     sync.RWMutex
 	rooms       map[string]struct{} // Set of joined room names
 	config      Config
+	touchMu     sync.Mutex
+	lastTouch   time.Time
 }
 
 func (c *Conn) trackRoom(room string) bool {
@@ -143,6 +145,28 @@ func (c *Conn) SendToClient(dstID, event string, payload []byte) {
 	}
 }
 
+// touchPresence updates the presence heartbeat score across joined rooms if interval has elapsed.
+func (c *Conn) touchPresence() {
+	interval := c.config.PresenceTouchInterval
+	if interval <= 0 {
+		interval = 54 * time.Second
+	}
+
+	c.touchMu.Lock()
+	now := time.Now()
+	if !c.lastTouch.IsZero() && now.Sub(c.lastTouch) < interval {
+		c.touchMu.Unlock()
+		return
+	}
+	c.lastTouch = now
+	c.touchMu.Unlock()
+
+	rooms := c.joinedRooms()
+	if len(rooms) > 0 && c.hub != nil {
+		c.hub.touchPresence(c.ID, rooms)
+	}
+}
+
 // dispatch routes an incoming message to handlers, direct recipients, or rooms.
 func (c *Conn) dispatch(msg *Message) {
 	select {
@@ -229,6 +253,7 @@ func (c *Conn) readPump() {
 	_ = c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
 	c.socket.SetPongHandler(func(string) error {
 		_ = c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
+		c.touchPresence()
 		return nil
 	})
 
@@ -306,13 +331,14 @@ func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]str
 		return nil
 	}
 	return &Conn{
-		ID:     id.String(),
-		Claims: claims,
-		hub:    h,
-		socket: sock,
-		send:   make(chan []byte, cfg.ChannelCapacity),
-		done:   make(chan struct{}),
-		rooms:  make(map[string]struct{}),
-		config: cfg,
+		ID:        id.String(),
+		Claims:    claims,
+		hub:       h,
+		socket:    sock,
+		send:      make(chan []byte, cfg.ChannelCapacity),
+		done:      make(chan struct{}),
+		rooms:     make(map[string]struct{}),
+		config:    cfg,
+		lastTouch: time.Now(),
 	}
 }

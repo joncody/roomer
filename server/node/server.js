@@ -14,6 +14,15 @@ import { create_message, decode_message } from "./message.js";
  *
  * @param {object} http_server - Node.js HTTP server.
  * @param {object} [options] - Server options.
+ * @param {object} [options.hub] - Pre-configured Hub coordinator.
+ * @param {object} [options.adapter] - Pluggable cluster adapter.
+ * @param {object} [options.metrics] - Telemetry collector.
+ * @param {Function} [options.authorize] - Handshake authenticator function.
+ * @param {number} [options.max_message_size=16777216] - Maximum frame byte size.
+ * @param {number} [options.channel_capacity=8192] - Kernel buffer limit factor.
+ * @param {number} [options.backpressure=0] - Backpressure strategy enum.
+ * @param {number} [options.ping_interval=54000] - Heartbeat ping period in ms.
+ * @param {number} [options.presence_touch_interval=54000] - Minimum presence heartbeat update interval in ms.
  * @returns {Readonly<{ hub: object, wss: WebSocketServer }>} Mounted server handle.
  */
 function create_roomer_server(http_server, options) {
@@ -57,6 +66,12 @@ function create_roomer_server(http_server, options) {
         : 54000
     );
 
+    const presence_touch_interval = (
+        typeof opts.presence_touch_interval === "number" && opts.presence_touch_interval > 0
+        ? opts.presence_touch_interval
+        : 54000
+    );
+
     const wss = new WebSocketServer({
         clientTracking: false,
         maxPayload: max_payload,
@@ -92,7 +107,15 @@ function create_roomer_server(http_server, options) {
         }
 
         const conn_id = randomUUID();
-        const conn = create_conn(conn_id, ws, hub, claims, capacity, backpressure);
+        const conn = create_conn(
+            conn_id,
+            ws,
+            hub,
+            claims,
+            capacity,
+            backpressure,
+            presence_touch_interval
+        );
 
         active_connections[conn_id] = conn;
         hub.add_conn(conn);

@@ -21,9 +21,10 @@ const BACKPRESSURE = Object.freeze({
  * @param {object} [claims] - Authenticated handshake claims.
  * @param {number} [capacity=8192] - Max queued frames buffer ceiling.
  * @param {number} [backpressure=0] - Backpressure strategy enum.
+ * @param {number} [presence_touch_interval=54000] - Minimum presence heartbeat touch interval in ms.
  * @returns {Readonly<object>} Frozen connection instance.
  */
-function create_conn(id, ws, hub, claims, capacity, backpressure) {
+function create_conn(id, ws, hub, claims, capacity, backpressure, presence_touch_interval) {
     const conn_claims = (
         typeof claims === "object" && claims !== null
         ? claims
@@ -43,9 +44,16 @@ function create_conn(id, ws, hub, claims, capacity, backpressure) {
         : BACKPRESSURE.DROP_SLOW_CLIENT
     );
 
+    const touch_interval_ms = (
+        typeof presence_touch_interval === "number" && presence_touch_interval > 0
+        ? presence_touch_interval
+        : 54000
+    );
+
     const rooms = Object.create(null);
     let is_closed = false;
     let is_alive = true;
+    let last_touch_ms = Date.now();
     let self;
 
     // Disable Nagle's algorithm for sub-millisecond real-time frame delivery
@@ -56,17 +64,6 @@ function create_conn(id, ws, hub, claims, capacity, backpressure) {
         typeof ws._socket.setNoDelay === "function"
     ) {
         ws._socket.setNoDelay(true);
-    }
-
-    // Heartbeat pong tracking
-    if (
-        ws !== null &&
-        typeof ws === "object" &&
-        typeof ws.on === "function"
-    ) {
-        ws.on("pong", function () {
-            is_alive = true;
-        });
     }
 
     function track_room(room) {
@@ -83,6 +80,35 @@ function create_conn(id, ws, hub, claims, capacity, backpressure) {
 
     function joined_rooms() {
         return Object.keys(rooms);
+    }
+
+    function touch_presence(interval_ms) {
+        const min_interval = (
+            typeof interval_ms === "number" && interval_ms > 0
+            ? interval_ms
+            : touch_interval_ms
+        );
+        const now = Date.now();
+        if (now - last_touch_ms < min_interval) {
+            return;
+        }
+        last_touch_ms = now;
+        const joined = joined_rooms();
+        if (joined.length > 0 && typeof hub.touch_presence === "function") {
+            hub.touch_presence(id, joined);
+        }
+    }
+
+    // Heartbeat pong tracking & presence touch
+    if (
+        ws !== null &&
+        typeof ws === "object" &&
+        typeof ws.on === "function"
+    ) {
+        ws.on("pong", function () {
+            is_alive = true;
+            touch_presence(touch_interval_ms);
+        });
     }
 
     function cleanup() {
@@ -165,6 +191,7 @@ function create_conn(id, ws, hub, claims, capacity, backpressure) {
         joined_rooms,
         send_to_client,
         send_to_room,
+        touch_presence,
         track_room,
         try_send,
         untrack_room,

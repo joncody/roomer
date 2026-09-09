@@ -7,10 +7,27 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // -----------------------------------------------------------------------------
-// 1. Message Encoding & Framing Tests
+// 1. Shard Struct Padding & Cache Line Alignment Tests (False Sharing)
+// -----------------------------------------------------------------------------
+
+func TestShard_CacheLinePadding(t *testing.T) {
+	connShardSize := unsafe.Sizeof(connShard{})
+	if connShardSize < 64 {
+		t.Errorf("expected connShard size >= 64 bytes to eliminate false sharing, got %d", connShardSize)
+	}
+
+	roomShardSize := unsafe.Sizeof(roomShard{})
+	if roomShardSize < 64 {
+		t.Errorf("expected roomShard size >= 64 bytes to eliminate false sharing, got %d", roomShardSize)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 2. Message Encoding & Framing Tests
 // -----------------------------------------------------------------------------
 
 func TestMessage_Roundtrip(t *testing.T) {
@@ -83,7 +100,7 @@ func TestMessage_MalformedInput(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 2. Handler Registration & Invariant Guard Tests
+// 3. Handler Registration & Invariant Guard Tests
 // -----------------------------------------------------------------------------
 
 func TestRegisterHandler_ReservedAndDuplicateGuards(t *testing.T) {
@@ -107,7 +124,7 @@ func TestRegisterHandler_ReservedAndDuplicateGuards(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 3. Backpressure Policy Tests
+// 4. Backpressure Policy & Presence Heartbeat Tests
 // -----------------------------------------------------------------------------
 
 func TestConn_BackpressureStrategies(t *testing.T) {
@@ -165,8 +182,36 @@ func TestConn_BackpressureStrategies(t *testing.T) {
 	}
 }
 
+func TestConn_PresenceHeartbeatTouchThrottling(t *testing.T) {
+	h := NewHub()
+	cfg := DefaultConfig()
+	cfg.PresenceTouchInterval = 100 * time.Millisecond
+
+	c := &Conn{
+		ID:        "touch_test_conn",
+		hub:       h,
+		send:      make(chan []byte, 10),
+		done:      make(chan struct{}),
+		rooms:     make(map[string]struct{}),
+		config:    cfg,
+		lastTouch: time.Now().Add(-200 * time.Millisecond),
+	}
+	h.addConn(c)
+	h.joinRoom("touch_room", c)
+
+	// First touch triggers score update
+	c.touchPresence()
+	firstTouch := c.lastTouch
+
+	// Immediate second touch is throttled
+	c.touchPresence()
+	if c.lastTouch != firstTouch {
+		t.Errorf("touchPresence should have been throttled within interval")
+	}
+}
+
 // -----------------------------------------------------------------------------
-// 4. Concurrency, Race Condition & Metrics Tests
+// 5. Concurrency, Race Condition & Metrics Tests
 // -----------------------------------------------------------------------------
 
 func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
@@ -260,7 +305,7 @@ func TestHub_GracefulShutdown(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 5. Benchmarks
+// 6. Benchmarks
 // -----------------------------------------------------------------------------
 
 func BenchmarkMessage_Bytes(b *testing.B) {

@@ -1,6 +1,6 @@
 /**
  * @fileoverview Redis Pub/Sub cluster adapter with loopback suppression,
- * presence synchronization sets, and O(1) unicast direct routing.
+ * presence synchronization sets, and true wire-level isolated unicast routing.
  */
 
 import { randomUUID } from "node:crypto";
@@ -49,6 +49,9 @@ function decode_envelope(payload) {
  * @param {object} pub_client - Connected ioredis publishing client.
  * @param {object} [sub_client] - Connected ioredis subscriber client.
  * @param {object} [options] - Configuration options.
+ * @param {string} [options.node_id] - Unique cluster node UUID.
+ * @param {string} [options.prefix="roomer:demo:"] - Channel/key prefix.
+ * @param {number} [options.presence_ttl=86400] - Eviction threshold in seconds for inactive presence members.
  * @returns {Readonly<object>} Frozen Redis adapter instance.
  */
 function create_redis_adapter(pub_client, sub_client, options) {
@@ -80,12 +83,18 @@ function create_redis_adapter(pub_client, sub_client, options) {
         prefix_val += ":";
     }
 
+    const presence_ttl_val = (
+        typeof opts.presence_ttl === "number" && opts.presence_ttl > 0
+        ? Math.floor(opts.presence_ttl)
+        : 86400
+    );
+
     function node_id() {
         return node_id_val;
     }
 
     async function publish_raw(room, raw_msg) {
-        const channel = prefix_val + room;
+        const channel = prefix_val + "room:" + room;
         const envelope = encode_envelope(node_id_val, raw_msg);
         await pub_client.publish(channel, envelope);
     }
@@ -118,9 +127,22 @@ function create_redis_adapter(pub_client, sub_client, options) {
     async function get_presence(room) {
         const key = prefix_val + "presence:" + room;
         const now = Math.floor(Date.now() / 1000);
-        const min_score = now - 86400;
+        const min_score = now - presence_ttl_val;
         await pub_client.zremrangebyscore(key, "-inf", min_score).catch(function () {});
         return await pub_client.zrangebyscore(key, min_score, "+inf");
+    }
+
+    async function touch_presence(conn_id, rooms) {
+        if (Array.isArray(rooms) === false || rooms.length === 0) {
+            return;
+        }
+        const score = Math.floor(Date.now() / 1000);
+        const pipe = pub_client.pipeline();
+        rooms.forEach(function (room) {
+            const key = prefix_val + "presence:" + room;
+            pipe.zadd(key, score, conn_id);
+        });
+        await pipe.exec();
     }
 
     async function register_node(conn_id) {
@@ -139,11 +161,13 @@ function create_redis_adapter(pub_client, sub_client, options) {
     }
 
     async function subscribe(callback) {
-        const pattern = prefix_val + "*";
-        await active_sub.psubscribe(pattern);
+        const room_pattern = prefix_val + "room:*";
+        const node_channel = prefix_val + "node:" + node_id_val;
 
-        active_sub.on("pmessageBuffer", function (_pat, channel_buf, msg_buf) {
-            const channel = channel_buf.toString("utf-8");
+        await active_sub.psubscribe(room_pattern);
+        await active_sub.subscribe(node_channel);
+
+        function handle_incoming(channel, msg_buf) {
             const decoded = decode_envelope(msg_buf);
             if (decoded === null) {
                 return;
@@ -154,13 +178,27 @@ function create_redis_adapter(pub_client, sub_client, options) {
                 return;
             }
 
-            const channel_suffix = (
+            let channel_suffix = (
                 channel.startsWith(prefix_val) === true
                 ? channel.slice(prefix_val.length)
                 : channel
             );
 
+            if (channel_suffix.startsWith("room:") === true) {
+                channel_suffix = channel_suffix.slice(5);
+            }
+
             callback(channel_suffix, decoded.sender_node_id, decoded.raw_msg);
+        }
+
+        active_sub.on("pmessageBuffer", function (_pat, channel_buf, msg_buf) {
+            const channel = channel_buf.toString("utf-8");
+            handle_incoming(channel, msg_buf);
+        });
+
+        active_sub.on("messageBuffer", function (channel_buf, msg_buf) {
+            const channel = channel_buf.toString("utf-8");
+            handle_incoming(channel, msg_buf);
         });
     }
 
@@ -184,6 +222,7 @@ function create_redis_adapter(pub_client, sub_client, options) {
         register_node,
         remove_presence,
         subscribe,
+        touch_presence,
         unregister_node
     });
 }
