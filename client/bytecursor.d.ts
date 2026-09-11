@@ -3,6 +3,8 @@ export interface ByteCursor {
     readonly length: number;
     readonly view: DataView;
     eof(): boolean;
+    getBigInt64(little_endian?: boolean): bigint;
+    getBigUint64(little_endian?: boolean): bigint;
     getBytes(len?: number): Uint8Array;
     getFloat32(little_endian?: boolean): number;
     getFloat64(little_endian?: boolean): number;
@@ -18,6 +20,8 @@ export interface ByteCursor {
     skip(n: number): ByteCursor;
     slice(start?: number, end?: number): ArrayBuffer;
     tell(): number;
+    writeBigInt64(v: bigint, little_endian?: boolean): ByteCursor;
+    writeBigUint64(v: bigint, little_endian?: boolean): ByteCursor;
     writeBytes(bytes: Uint8Array): ByteCursor;
     writeFloat32(v: number, little_endian?: boolean): ByteCursor;
     writeFloat64(v: number, little_endian?: boolean): ByteCursor;

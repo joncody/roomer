@@ -1,7 +1,7 @@
 /**
  * @fileoverview Functional byte-level cursor for ArrayBuffer and DataView.
  * Provides seekable, sequential reading and writing for binary numbers,
- * raw bytes, and UTF-8 strings.
+ * raw bytes, UTF-8 strings, and BigInts.
  */
 
 /**
@@ -63,7 +63,31 @@ function assert_integer(value, min, max, name) {
         throw new TypeError(name + " must be an integer");
     }
     if (value < min || value > max) {
-        throw new RangeError(name + " must be between " + min + " and " + max);
+        throw new RangeError(
+            name + " must be between " + String(min) + " and " + String(max)
+        );
+    }
+}
+
+/**
+ * Asserts that a value is a BigInt within a specified range.
+ *
+ * @param {bigint} value - The value to validate.
+ * @param {bigint} min - The minimum allowed value (inclusive).
+ * @param {bigint} max - The maximum allowed value (inclusive).
+ * @param {string} name - The name of the parameter for error reporting.
+ * @throws {TypeError} If the value is not a bigint.
+ * @throws {RangeError} If the value is outside the specified range.
+ * @returns {void}
+ */
+function assert_bigint(value, min, max, name) {
+    if (typeof value !== "bigint") {
+        throw new TypeError(name + " must be a bigint");
+    }
+    if (value < min || value > max) {
+        throw new RangeError(
+            name + " must be between " + String(min) + " and " + String(max)
+        );
     }
 }
 
@@ -73,6 +97,10 @@ function assert_integer(value, min, max, name) {
  *     The underlying ArrayBuffer.
  * @property {() => boolean} eof
  *     Checks if the cursor is at the end of the view.
+ * @property {(little_endian?: boolean) => bigint} getBigInt64
+ *     Reads a signed 64-bit integer.
+ * @property {(little_endian?: boolean) => bigint} getBigUint64
+ *     Reads an unsigned 64-bit integer.
  * @property {(len?: number) => Uint8Array} getBytes
  *     Reads bytes from the current position.
  * @property {(little_endian?: boolean) => number} getFloat32
@@ -107,6 +135,10 @@ function assert_integer(value, min, max, name) {
  *     Returns the current cursor position.
  * @property {DataView} view
  *     The underlying DataView.
+ * @property {(v: bigint, little_endian?: boolean) => ByteCursor} writeBigInt64
+ *     Writes a signed 64-bit integer.
+ * @property {(v: bigint, little_endian?: boolean) => ByteCursor} writeBigUint64
+ *     Writes an unsigned 64-bit integer.
  * @property {(bytes: Uint8Array) => ByteCursor} writeBytes
  *     Writes bytes into the buffer.
  * @property {(v: number, little_endian?: boolean) => ByteCursor} writeFloat32
@@ -385,7 +417,8 @@ function bytecursor(buffer, view_offset, view_length) {
 
     /**
      * Reads and decodes a UTF-8 string from cursor and advances cursor.
-     * Decodes directly from the buffer view without intermediary buffer slicing.
+     * Decodes directly from the buffer view without intermediary buffer
+     * slicing.
      *
      * @param {number} [length] - Number of bytes to read. Defaults to
      *     remaining bytes in view.
@@ -466,7 +499,7 @@ function bytecursor(buffer, view_offset, view_length) {
      * @returns {number} An unsigned 16-bit integer (0 to 65535).
      */
     function getUint16(little_endian) {
-        return view.getUint16(advance(2), Boolean(little_endian));
+        return view.getUint16(advance(2), little_endian === true);
     }
 
     /**
@@ -477,7 +510,7 @@ function bytecursor(buffer, view_offset, view_length) {
      * @returns {number} A signed 16-bit integer (-32768 to 32767).
      */
     function getInt16(little_endian) {
-        return view.getInt16(advance(2), Boolean(little_endian));
+        return view.getInt16(advance(2), little_endian === true);
     }
 
     /**
@@ -488,7 +521,7 @@ function bytecursor(buffer, view_offset, view_length) {
      * @returns {number} An unsigned 32-bit integer (0 to 4294967295).
      */
     function getUint32(little_endian) {
-        return view.getUint32(advance(4), Boolean(little_endian));
+        return view.getUint32(advance(4), little_endian === true);
     }
 
     /**
@@ -499,7 +532,29 @@ function bytecursor(buffer, view_offset, view_length) {
      * @returns {number} A signed 32-bit integer (-2147483648 to 2147483647).
      */
     function getInt32(little_endian) {
-        return view.getInt32(advance(4), Boolean(little_endian));
+        return view.getInt32(advance(4), little_endian === true);
+    }
+
+    /**
+     * Reads a signed 64-bit integer and advances the cursor by 8 bytes.
+     *
+     * @param {boolean} [little_endian=false] - Whether to read little-endian.
+     * @throws {RangeError} If the read exceeds view bounds.
+     * @returns {bigint} A signed 64-bit integer.
+     */
+    function getBigInt64(little_endian) {
+        return view.getBigInt64(advance(8), little_endian === true);
+    }
+
+    /**
+     * Reads an unsigned 64-bit integer and advances the cursor by 8 bytes.
+     *
+     * @param {boolean} [little_endian=false] - Whether to read little-endian.
+     * @throws {RangeError} If the read exceeds view bounds.
+     * @returns {bigint} An unsigned 64-bit integer.
+     */
+    function getBigUint64(little_endian) {
+        return view.getBigUint64(advance(8), little_endian === true);
     }
 
     /**
@@ -510,7 +565,7 @@ function bytecursor(buffer, view_offset, view_length) {
      * @returns {number} A 32-bit floating point number.
      */
     function getFloat32(little_endian) {
-        return view.getFloat32(advance(4), Boolean(little_endian));
+        return view.getFloat32(advance(4), little_endian === true);
     }
 
     /**
@@ -521,7 +576,7 @@ function bytecursor(buffer, view_offset, view_length) {
      * @returns {number} A 64-bit floating point number.
      */
     function getFloat64(little_endian) {
-        return view.getFloat64(advance(8), Boolean(little_endian));
+        return view.getFloat64(advance(8), little_endian === true);
     }
 
     // -------------------------------------------------------------------------
@@ -567,7 +622,7 @@ function bytecursor(buffer, view_offset, view_length) {
      */
     function writeUint16(v, little_endian) {
         assert_integer(v, 0, 65535, "Uint16 value");
-        view.setUint16(advance(2), v, Boolean(little_endian));
+        view.setUint16(advance(2), v, little_endian === true);
         return self;
     }
 
@@ -582,7 +637,7 @@ function bytecursor(buffer, view_offset, view_length) {
      */
     function writeInt16(v, little_endian) {
         assert_integer(v, -32768, 32767, "Int16 value");
-        view.setInt16(advance(2), v, Boolean(little_endian));
+        view.setInt16(advance(2), v, little_endian === true);
         return self;
     }
 
@@ -597,7 +652,7 @@ function bytecursor(buffer, view_offset, view_length) {
      */
     function writeUint32(v, little_endian) {
         assert_integer(v, 0, 4294967295, "Uint32 value");
-        view.setUint32(advance(4), v, Boolean(little_endian));
+        view.setUint32(advance(4), v, little_endian === true);
         return self;
     }
 
@@ -612,7 +667,39 @@ function bytecursor(buffer, view_offset, view_length) {
      */
     function writeInt32(v, little_endian) {
         assert_integer(v, -2147483648, 2147483647, "Int32 value");
-        view.setInt32(advance(4), v, Boolean(little_endian));
+        view.setInt32(advance(4), v, little_endian === true);
+        return self;
+    }
+
+    /**
+     * Writes a signed 64-bit integer and advances the cursor by 8 bytes.
+     *
+     * @param {bigint} v - A signed 64-bit integer.
+     * @param {boolean} [little_endian=false] - Whether to write little-endian.
+     * @throws {TypeError} If v is not a bigint.
+     * @throws {RangeError} If v is out of range or exceeds view bounds.
+     * @returns {ByteCursor} The byte cursor instance.
+     */
+    function writeBigInt64(v, little_endian) {
+        assert_bigint(
+            v, -9223372036854775808n, 9223372036854775807n, "BigInt64 value"
+        );
+        view.setBigInt64(advance(8), v, little_endian === true);
+        return self;
+    }
+
+    /**
+     * Writes an unsigned 64-bit integer and advances the cursor by 8 bytes.
+     *
+     * @param {bigint} v - An unsigned 64-bit integer.
+     * @param {boolean} [little_endian=false] - Whether to write little-endian.
+     * @throws {TypeError} If v is not a bigint.
+     * @throws {RangeError} If v is out of range or exceeds view bounds.
+     * @returns {ByteCursor} The byte cursor instance.
+     */
+    function writeBigUint64(v, little_endian) {
+        assert_bigint(v, 0n, 18446744073709551615n, "BigUint64 value");
+        view.setBigUint64(advance(8), v, little_endian === true);
         return self;
     }
 
@@ -629,7 +716,7 @@ function bytecursor(buffer, view_offset, view_length) {
         if (typeof v !== "number") {
             throw new TypeError("Float32 value must be a number");
         }
-        view.setFloat32(advance(4), v, Boolean(little_endian));
+        view.setFloat32(advance(4), v, little_endian === true);
         return self;
     }
 
@@ -646,7 +733,7 @@ function bytecursor(buffer, view_offset, view_length) {
         if (typeof v !== "number") {
             throw new TypeError("Float64 value must be a number");
         }
-        view.setFloat64(advance(8), v, Boolean(little_endian));
+        view.setFloat64(advance(8), v, little_endian === true);
         return self;
     }
 
@@ -657,6 +744,8 @@ function bytecursor(buffer, view_offset, view_length) {
     self = Object.freeze({
         buffer,
         eof,
+        getBigInt64,
+        getBigUint64,
         getBytes,
         getFloat32,
         getFloat64,
@@ -674,6 +763,8 @@ function bytecursor(buffer, view_offset, view_length) {
         slice,
         tell,
         view,
+        writeBigInt64,
+        writeBigUint64,
         writeBytes,
         writeFloat32,
         writeFloat64,
