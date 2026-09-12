@@ -56,7 +56,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-roomer = { version = "1.0.1", features = ["redis-adapter"] }
+roomer = { version = "1.1.2", features = ["redis-adapter"] }
 tokio = { version = "1.43", features = ["full"] }
 axum = { version = "0.8.9", features = ["ws"] }
 bytes = "1.10"

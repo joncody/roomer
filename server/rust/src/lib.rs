@@ -59,7 +59,7 @@ pub use adapter::{Adapter, DynAdapter, LocalAdapter};
 pub use auth::{BearerAuth, QueryAuth, extract_bearer_token, extract_query_param};
 pub use conn::{Conn, OutboundMessage};
 pub use error::{AdapterError, AuthError, FrameError, HandlerError, RoomerError};
-pub use handler::{AppState, AuthorizeFn, ServerConfig, ws_handler};
+pub use handler::{AppState, AuthorizeFn, RoomAuthFn, ServerConfig, ws_handler};
 pub use hub::{Hub, MessageHandler, RESERVED_EVENTS};
 pub use message::Message;
 pub use metrics::{DynMetrics, InMemoryMetrics, Metrics, NopMetrics};
