@@ -44,24 +44,25 @@ type RoomAuthorize func(c *Conn, room string) bool
 // MessageHandler processes a custom event message from a connection.
 type MessageHandler func(c *Conn, msg *Message) error
 
-// Config holds configuration options for WebSocket connections and upgrader.
+// Config holds configuration options for WebSocket connections, rate limits, and upgrader.
 type Config struct {
-	Hub                   *Hub
-	Authorize             Authorize
-	RoomAuthorize         RoomAuthorize
-	MaxMessageSize        int64
-	WriteWait             time.Duration
-	PongWait              time.Duration
-	PingPeriod            time.Duration
-	ChannelCapacity       int
-	ReadBufferSize        int
-	WriteBufferSize       int
-	CheckOrigin           func(r *http.Request) bool
-	Logger                *slog.Logger
-	Metrics               Metrics
-	Adapter               Adapter
-	Backpressure          BackpressureStrategy
-	PresenceTouchInterval time.Duration
+	Hub              *Hub
+	Authorize        Authorize
+	RoomAuthorize    RoomAuthorize
+	MaxMessageSize   int64
+	WriteWait        time.Duration
+	PongWait         time.Duration
+	PingPeriod       time.Duration
+	ChannelCapacity  int
+	ReadBufferSize   int
+	WriteBufferSize  int
+	CheckOrigin      func(r *http.Request) bool
+	Logger           *slog.Logger
+	Metrics          Metrics
+	Adapter          Adapter
+	Backpressure     BackpressureStrategy
+	ControlRateLimit float64 // Token-bucket refill rate for join/leave events (tokens/sec)
+	ControlBurst     int     // Token-bucket maximum burst capacity for join/leave events
 }
 
 // Option sets a configuration option for roomer WebSocket handling.
@@ -70,20 +71,21 @@ type Option func(*Config)
 // DefaultConfig returns a Config with production-grade default settings.
 func DefaultConfig() Config {
 	return Config{
-		Hub:                   defaultHub,
-		MaxMessageSize:        16 * 1024 * 1024,
-		WriteWait:             10 * time.Second,
-		PongWait:              60 * time.Second,
-		PingPeriod:            54 * time.Second,
-		ChannelCapacity:       2048,
-		ReadBufferSize:        4096,
-		WriteBufferSize:       4096,
-		CheckOrigin:           nil, // gorilla/websocket enforces same-origin by default
-		Logger:                slog.Default(),
-		Metrics:               NopMetrics{},
-		Adapter:               newLocalAdapter(),
-		Backpressure:          DropSlowClient,
-		PresenceTouchInterval: 54 * time.Second,
+		Hub:              defaultHub,
+		MaxMessageSize:   16 * 1024 * 1024,
+		WriteWait:        10 * time.Second,
+		PongWait:         60 * time.Second,
+		PingPeriod:       54 * time.Second,
+		ChannelCapacity:  2048,
+		ReadBufferSize:   4096,
+		WriteBufferSize:  4096,
+		CheckOrigin:      nil, // gorilla/websocket enforces same-origin by default
+		Logger:           slog.Default(),
+		Metrics:          NopMetrics{},
+		Adapter:          newLocalAdapter(),
+		Backpressure:     DropSlowClient,
+		ControlRateLimit: 10.0,
+		ControlBurst:     20,
 	}
 }
 
@@ -211,11 +213,14 @@ func WithBackpressureStrategy(strategy BackpressureStrategy) Option {
 	}
 }
 
-// WithPresenceTouchInterval sets the minimum interval between presence heartbeat score touches.
-func WithPresenceTouchInterval(d time.Duration) Option {
+// WithControlRateLimit sets the token-bucket rate limit and burst for join/leave control events.
+func WithControlRateLimit(rate float64, burst int) Option {
 	return func(c *Config) {
-		if d > 0 {
-			c.PresenceTouchInterval = d
+		if rate > 0 {
+			c.ControlRateLimit = rate
+		}
+		if burst > 0 {
+			c.ControlBurst = burst
 		}
 	}
 }

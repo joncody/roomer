@@ -3,9 +3,11 @@ import { EventEmitter } from "./emitter";
 export interface Packet {
     dst: string;
     event: string;
+    flags: number;
     payload: Uint8Array;
     room: string;
     src: string;
+    version: number;
 }
 
 export interface RoomerOptions {

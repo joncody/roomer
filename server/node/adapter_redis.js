@@ -1,6 +1,6 @@
 /**
  * @fileoverview Redis Pub/Sub cluster adapter with loopback suppression,
- * presence synchronization sets, and true wire-level isolated unicast routing.
+ * auto-expiring SET presence synchronization, and true wire-level isolated unicast routing.
  */
 
 import { randomUUID } from "node:crypto";
@@ -44,14 +44,14 @@ function decode_envelope(payload) {
 }
 
 /**
- * Creates a Redis cluster adapter.
+ * Creates a Redis cluster adapter with plain SET presence and key expiration.
  *
  * @param {object} pub_client - Connected ioredis publishing client.
  * @param {object} [sub_client] - Connected ioredis subscriber client.
  * @param {object} [options] - Configuration options.
  * @param {string} [options.node_id] - Unique cluster node UUID.
  * @param {string} [options.prefix="roomer:demo:"] - Channel/key prefix.
- * @param {number} [options.presence_ttl=86400] - Eviction threshold in seconds for inactive presence members.
+ * @param {number} [options.presence_ttl=86400] - Key expiration in seconds for presence sets.
  * @returns {Readonly<object>} Frozen Redis adapter instance.
  */
 function create_redis_adapter(pub_client, sub_client, options) {
@@ -115,34 +115,20 @@ function create_redis_adapter(pub_client, sub_client, options) {
 
     async function add_presence(room, conn_id) {
         const key = prefix_val + "presence:" + room;
-        const score = Math.floor(Date.now() / 1000);
-        await pub_client.zadd(key, score, conn_id);
+        const pipe = pub_client.pipeline();
+        pipe.sadd(key, conn_id);
+        pipe.expire(key, presence_ttl_val);
+        await pipe.exec();
     }
 
     async function remove_presence(room, conn_id) {
         const key = prefix_val + "presence:" + room;
-        await pub_client.zrem(key, conn_id);
+        await pub_client.srem(key, conn_id);
     }
 
     async function get_presence(room) {
         const key = prefix_val + "presence:" + room;
-        const now = Math.floor(Date.now() / 1000);
-        const min_score = now - presence_ttl_val;
-        await pub_client.zremrangebyscore(key, "-inf", min_score).catch(function () {});
-        return await pub_client.zrangebyscore(key, min_score, "+inf");
-    }
-
-    async function touch_presence(conn_id, rooms) {
-        if (Array.isArray(rooms) === false || rooms.length === 0) {
-            return;
-        }
-        const score = Math.floor(Date.now() / 1000);
-        const pipe = pub_client.pipeline();
-        rooms.forEach(function (room) {
-            const key = prefix_val + "presence:" + room;
-            pipe.zadd(key, score, conn_id);
-        });
-        await pipe.exec();
+        return await pub_client.smembers(key);
     }
 
     async function register_node(conn_id) {
@@ -173,7 +159,7 @@ function create_redis_adapter(pub_client, sub_client, options) {
                 return;
             }
 
-            // Loopback suppression
+            // Loopback suppression: drop self-echoes
             if (decoded.sender_node_id === node_id_val) {
                 return;
             }
@@ -222,7 +208,6 @@ function create_redis_adapter(pub_client, sub_client, options) {
         register_node,
         remove_presence,
         subscribe,
-        touch_presence,
         unregister_node
     });
 }

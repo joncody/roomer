@@ -1,6 +1,6 @@
 /**
- * @fileoverview HTTP / WebSocket server mount helper with immediate synchronous
- * listener attachment to prevent event-loop race conditions.
+ * @fileoverview HTTP / WebSocket server mount helper with token-bucket control-plane
+ * rate limiting and immediate synchronous listener attachment.
  */
 
 import { WebSocketServer } from "ws";
@@ -22,7 +22,8 @@ import { create_message, decode_message } from "./message.js";
  * @param {number} [options.channel_capacity=8192] - Kernel buffer limit factor.
  * @param {number} [options.backpressure=0] - Backpressure strategy enum.
  * @param {number} [options.ping_interval=54000] - Heartbeat ping period in ms.
- * @param {number} [options.presence_touch_interval=54000] - Minimum presence heartbeat update interval in ms.
+ * @param {number} [options.control_rate_limit=10] - Token-bucket refill rate for control events (tokens/sec).
+ * @param {number} [options.control_burst=20] - Token-bucket max burst capacity for control events.
  * @returns {Readonly<{ hub: object, wss: WebSocketServer }>} Mounted server handle.
  */
 function create_roomer_server(http_server, options) {
@@ -43,13 +44,13 @@ function create_roomer_server(http_server, options) {
     );
 
     const max_payload = (
-        typeof opts.max_message_size === "number"
+        typeof opts.max_message_size === "number" && opts.max_message_size > 0
         ? opts.max_message_size
         : 16 * 1024 * 1024
     );
 
     const capacity = (
-        typeof opts.channel_capacity === "number"
+        typeof opts.channel_capacity === "number" && opts.channel_capacity > 0
         ? opts.channel_capacity
         : 8192
     );
@@ -61,15 +62,21 @@ function create_roomer_server(http_server, options) {
     );
 
     const ping_interval_ms = (
-        typeof opts.ping_interval === "number"
+        typeof opts.ping_interval === "number" && opts.ping_interval > 0
         ? opts.ping_interval
         : 54000
     );
 
-    const presence_touch_interval = (
-        typeof opts.presence_touch_interval === "number" && opts.presence_touch_interval > 0
-        ? opts.presence_touch_interval
-        : 54000
+    const control_rate = (
+        typeof opts.control_rate_limit === "number" && opts.control_rate_limit > 0
+        ? opts.control_rate_limit
+        : 10.0
+    );
+
+    const control_burst_val = (
+        typeof opts.control_burst === "number" && opts.control_burst > 0
+        ? opts.control_burst
+        : 20
     );
 
     const wss = new WebSocketServer({
@@ -114,14 +121,15 @@ function create_roomer_server(http_server, options) {
             claims,
             capacity,
             backpressure,
-            presence_touch_interval
+            control_rate,
+            control_burst_val
         );
 
         active_connections[conn_id] = conn;
         hub.add_conn(conn);
         hub.join_room("root", conn);
 
-        // 1. ATTACH LISTENERS SYNCHRONOUSLY FIRST (Eliminates race condition)
+        // 1. ATTACH LISTENERS SYNCHRONOUSLY FIRST (with early MaxMessageSize enforcement)
         ws.on("message", function (data) {
             const buf = (
                 Buffer.isBuffer(data)
@@ -133,8 +141,14 @@ function create_roomer_server(http_server, options) {
                 )
             );
 
+            // Enforce MaxMessageSize validation before reading / dispatching frame
+            if (buf.length > max_payload) {
+                ws.close(1009, "Message too big");
+                return;
+            }
+
             hub.metrics.onMessageReceived(buf.length);
-            const msg = decode_message(buf);
+            const msg = decode_message(buf, max_payload);
             if (msg !== null) {
                 hub.dispatch(conn, msg).catch(function () {});
             }
@@ -150,7 +164,7 @@ function create_roomer_server(http_server, options) {
             conn.cleanup();
         });
 
-        // 2. Fetch cluster presence and send root join_ack asynchronously
+        // 2. Fetch cluster presence and send root join_ack using 12-byte wire framing
         hub.get_cluster_presence("root").then(function (snap) {
             const ack = create_message(
                 "root",

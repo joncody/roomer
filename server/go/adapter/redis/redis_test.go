@@ -109,9 +109,16 @@ func TestAdapter_Publish(t *testing.T) {
 		t.Errorf("expected nodeID %q, got %q", nodeID, parsedNodeID)
 	}
 
+	// Message frame inside envelope satisfies 12-byte wire format
 	parsedMsg := roomer.BytesToMessage(payload[4+idLen:])
 	if parsedMsg == nil {
 		t.Fatalf("failed to parse message payload from envelope")
+	}
+	if parsedMsg.Version != roomer.CurrentProtocolVersion {
+		t.Errorf("expected protocol version %d, got %d", roomer.CurrentProtocolVersion, parsedMsg.Version)
+	}
+	if parsedMsg.Room != "lobby" {
+		t.Errorf("expected room 'lobby', got %q", parsedMsg.Room)
 	}
 	if !bytes.Equal(parsedMsg.Payload, []byte("hello redis")) {
 		t.Errorf("expected payload 'hello redis', got %s", string(parsedMsg.Payload))

@@ -18,13 +18,13 @@ fn bench_message_encode_decode(c: &mut Criterion) {
 
     group.throughput(Throughput::Bytes(raw.len() as u64));
 
-    group.bench_function("encode_1kb", |b| {
+    group.bench_function("encode_1kb_12b_header", |b| {
         b.iter(|| {
             black_box(msg.encode());
         });
     });
 
-    group.bench_function("decode_1kb", |b| {
+    group.bench_function("decode_1kb_12b_header", |b| {
         b.iter(|| {
             black_box(Message::decode(black_box(raw.clone())).unwrap());
         });

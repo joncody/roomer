@@ -6,7 +6,7 @@
 [![Typing: Typed](https://img.shields.io/badge/Typing-PEP%20484%20%2F%20561-blue?style=flat)](https://peps.python.org/pep-0561/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
-High-performance, asynchronous Python client for the Roomer WebSocket framework with zero-copy binary framing, automatic exponential reconnection with jitter, cluster-wide presence synchronization, and 100% wire protocol parity across Go, Rust, and Node.js servers.
+High-performance, asynchronous Python client for the Roomer WebSocket framework with 12-byte zero-copy binary framing, automatic exponential reconnection with jitter, cluster-wide auto-expiring SET presence synchronization, and 100% wire protocol parity across Go, Rust, and Node.js servers.
 
 > 📖 **For Wire Protocol specifications and Server documentation, see the [Root README](../../README.md).**
 
@@ -29,8 +29,8 @@ The `roomer-client` library provides an asynchronous, non-blocking interface for
                +-------------------+-------------------+-----------+
                                    |                   |
                      +-------------v----+        +-----v-------------+
-                     | Room Multiplexer |        | Binary Wire Frame |
-                     | (Presence & Acks)|        | (struct.pack >I)  |
+                     | Room Multiplexer |        | 12B Wire Framing  |
+                     | (Presence & Acks)|        | (struct.pack_into)|
                      +------------------+        +-------------------+
                                    |                   |
                +-------------------v-------------------v-----------+
@@ -43,7 +43,7 @@ The `roomer-client` library provides an asynchronous, non-blocking interface for
 
 ## ⚡ Key Features
 
-- **High-Performance Binary Wire Framing**: Serializes and unpacks 5 big-endian length-prefixed fields via native `struct.pack(">I", ...)` with zero-copy `memoryview` slicing.
+- **High-Performance 12-Byte Wire Framing**: Serializes and unpacks a 2-byte `[1B Version][1B Flags]` header and right-sized Big-Endian length prefixes via pre-allocated `bytearray` and zero-copy `struct.pack_into()` for maximum CPU efficiency.
 - **Dual-Mode Event Emitter**: Register event listeners as either standard synchronous functions (`def handler(...)`) or native coroutines (`async def handler(...)`).
 - **Async Context Manager**: Native `async with roomer("ws://...") as root:` pattern for deterministic lifecycle management and cleanup.
 - **Automatic Exponential Reconnection**: Recovers from abrupt socket disconnects with randomized jitter backoff while preserving active room subscriptions across reconnects.

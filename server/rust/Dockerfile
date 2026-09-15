@@ -8,7 +8,7 @@ COPY . .
 
 WORKDIR /app/server/rust
 
-ARG EXAMPLE=server_with_redis
+ARG EXAMPLE=server
 ARG FEATURES=redis-adapter
 
 RUN cargo build --release --example ${EXAMPLE} --features ${FEATURES} && \

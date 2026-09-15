@@ -1,4 +1,4 @@
-//! Redis Pub/Sub clustering adapter with presence tracking, loopback suppression, and unicast routing.
+//! Redis Pub/Sub clustering adapter with auto-expiring SET presence, loopback suppression, and unicast routing.
 
 use super::{Adapter, AdapterError, SubscribeCallback};
 use crate::message::Message;
@@ -48,7 +48,7 @@ impl RedisAdapterBuilder {
         self
     }
 
-    /// Sets the expiration threshold for inactive presence entries (default: 24h).
+    /// Sets the expiration threshold for presence SET keys.
     pub fn presence_ttl(mut self, ttl: Duration) -> Self {
         self.presence_ttl = ttl;
         self
@@ -86,7 +86,7 @@ impl RedisAdapterBuilder {
     }
 }
 
-/// Redis pub/sub cluster adapter with automatic presence sync, loopback suppression, and unicast routing.
+/// Redis pub/sub cluster adapter with SET presence, loopback suppression, and unicast routing.
 pub struct RedisAdapter {
     client: ::redis::Client,
     node_id: String,
@@ -224,14 +224,13 @@ impl Adapter for RedisAdapter {
     async fn add_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError> {
         let mut conn = self.get_publish_conn().await?;
         let key = format!("{}presence:{}", self.prefix, room);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let _res: i64 = ::redis::cmd("ZADD")
-            .arg(&key)
-            .arg(now)
-            .arg(conn_id)
+        let ttl_secs = self.presence_ttl.as_secs().max(1);
+
+        let mut pipe = ::redis::pipe();
+        pipe.cmd("SADD").arg(&key).arg(conn_id).ignore();
+        pipe.cmd("EXPIRE").arg(&key).arg(ttl_secs).ignore();
+
+        let () = pipe
             .query_async(&mut conn)
             .await
             .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
@@ -241,7 +240,7 @@ impl Adapter for RedisAdapter {
     async fn remove_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError> {
         let mut conn = self.get_publish_conn().await?;
         let key = format!("{}presence:{}", self.prefix, room);
-        let _res: i64 = ::redis::cmd("ZREM")
+        let _res: i64 = ::redis::cmd("SREM")
             .arg(&key)
             .arg(conn_id)
             .query_async(&mut conn)
@@ -253,49 +252,12 @@ impl Adapter for RedisAdapter {
     async fn get_presence(&self, room: &str) -> Result<Vec<String>, AdapterError> {
         let mut conn = self.get_publish_conn().await?;
         let key = format!("{}presence:{}", self.prefix, room);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let min_score = now.saturating_sub(self.presence_ttl.as_secs());
-
-        let _prune: Result<i64, _> = ::redis::cmd("ZREMRANGEBYSCORE")
+        let members: Vec<String> = ::redis::cmd("SMEMBERS")
             .arg(&key)
-            .arg("-inf")
-            .arg(min_score)
-            .query_async(&mut conn)
-            .await;
-
-        let members: Vec<String> = ::redis::cmd("ZRANGEBYSCORE")
-            .arg(&key)
-            .arg(min_score)
-            .arg("+inf")
             .query_async(&mut conn)
             .await
             .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
         Ok(members)
-    }
-
-    async fn touch_presence(&self, conn_id: &str, rooms: &[String]) -> Result<(), AdapterError> {
-        if rooms.is_empty() {
-            return Ok(());
-        }
-        let mut conn = self.get_publish_conn().await?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let mut pipe = ::redis::pipe();
-        for room in rooms {
-            let key = format!("{}presence:{}", self.prefix, room);
-            pipe.cmd("ZADD").arg(&key).arg(now).arg(conn_id).ignore();
-        }
-        let () = pipe
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
-        Ok(())
     }
 
     async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError> {

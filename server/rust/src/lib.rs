@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-#![doc(html_root_url = "https://docs.rs/roomer/1.0.0")]
+#![doc(html_root_url = "https://docs.rs/roomer/1.2.0")]
 
 //! # `roomer` – High-Performance Room-Based WebSocket Framework
 //!
@@ -8,9 +8,10 @@
 //! and JavaScript/TypeScript (client). It provides:
 //!
 //! - **Room Management:** Atomic dynamic room creation, subscription, and cleanup.
-//! - **Binary Protocol:** High-throughput, zero-copy packet framing.
-//! - **Horizontal Clustering:** Pluggable multi-node scaling (e.g. Redis pub/sub with loopback suppression).
-//! - **Strict Concurrency Safety:** Sharded lock-striped concurrency via `DashMap`.
+//! - **12-Byte Binary Protocol:** High-throughput wire framing with 2-byte header `[1B Version][1B Flags]` and right-sized Big-Endian length prefixes.
+//! - **Token-Bucket Control Protection:** Rate limits `join` and `leave` operations to prevent control-plane spam.
+//! - **Horizontal Clustering:** Pluggable multi-node scaling with auto-expiring SET presence and loopback suppression.
+//! - **Strict Concurrency Safety:** Sharded lock-striped concurrency via `DashMap` and 64-byte cache line alignment.
 //! - **Observability:** Metric observation hooks and Tokio `tracing` diagnostics.
 //!
 //! ## Quick Example
@@ -48,7 +49,7 @@ pub mod error;
 pub mod handler;
 /// Central hub for room sharding, routing, and message dispatch.
 pub mod hub;
-/// Zero-copy binary message framing serialization and deserialization.
+/// Zero-copy 12-byte binary message framing serialization and deserialization.
 pub mod message;
 /// Real-time metrics collection and observability hooks.
 pub mod metrics;
@@ -61,7 +62,7 @@ pub use conn::{BackpressureStrategy, Conn, OutboundMessage};
 pub use error::{AdapterError, AuthError, FrameError, HandlerError, RoomerError};
 pub use handler::{AppState, AuthorizeFn, RoomAuthFn, ServerConfig, ws_handler};
 pub use hub::{Hub, MessageHandler, RESERVED_EVENTS};
-pub use message::Message;
+pub use message::{DEFAULT_FLAGS, HEADER_OVERHEAD, Message, PROTOCOL_VERSION};
 pub use metrics::{DynMetrics, InMemoryMetrics, Metrics, NopMetrics};
 pub use room::Room;
 

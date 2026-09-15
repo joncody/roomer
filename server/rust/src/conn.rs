@@ -5,8 +5,9 @@ use bytes::Bytes;
 use dashmap::DashSet;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
 
 /// Backpressure policy when outbound connection queue is saturated.
@@ -30,6 +31,15 @@ pub enum OutboundMessage {
     Close(u16, String),
 }
 
+/// Internal state tracking token-bucket rate limiter for control operations.
+#[derive(Debug)]
+struct ControlLimiter {
+    tokens: f64,
+    last_refill: Instant,
+    rate: f64,
+    burst: f64,
+}
+
 /// Represents an individual active WebSocket connection.
 pub struct Conn {
     /// Globally unique connection identifier (UUID v4).
@@ -47,7 +57,7 @@ pub struct Conn {
     /// Asynchronous notification channel signaling immediate connection teardown.
     pub abort_notify: Arc<Notify>,
     is_aborted: AtomicBool,
-    last_touch_ms: AtomicU64,
+    control_limiter: Mutex<ControlLimiter>,
 }
 
 impl Conn {
@@ -59,12 +69,14 @@ impl Conn {
         send_tx: mpsc::Sender<OutboundMessage>,
         metrics: DynMetrics,
     ) -> Arc<Self> {
-        Self::with_backpressure(
+        Self::with_rate_limit(
             id,
             claims,
             send_tx,
             metrics,
             BackpressureStrategy::default(),
+            10.0,
+            20.0,
         )
     }
 
@@ -77,11 +89,20 @@ impl Conn {
         metrics: DynMetrics,
         backpressure: BackpressureStrategy,
     ) -> Arc<Self> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        Self::with_rate_limit(id, claims, send_tx, metrics, backpressure, 10.0, 20.0)
+    }
 
+    /// Constructs a new `Conn` with custom backpressure and token-bucket rate limiter settings.
+    #[must_use]
+    pub fn with_rate_limit(
+        id: String,
+        claims: HashMap<String, String>,
+        send_tx: mpsc::Sender<OutboundMessage>,
+        metrics: DynMetrics,
+        backpressure: BackpressureStrategy,
+        rate: f64,
+        burst: f64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id,
             claims,
@@ -91,8 +112,30 @@ impl Conn {
             backpressure,
             abort_notify: Arc::new(Notify::new()),
             is_aborted: AtomicBool::new(false),
-            last_touch_ms: AtomicU64::new(now_ms),
+            control_limiter: Mutex::new(ControlLimiter {
+                tokens: burst,
+                last_refill: Instant::now(),
+                rate: if rate > 0.0 { rate } else { 10.0 },
+                burst: if burst > 0.0 { burst } else { 20.0 },
+            }),
         })
+    }
+
+    /// Evaluates token-bucket rate limiter for control-plane requests (join/leave).
+    #[must_use]
+    pub fn allow_control_event(&self) -> bool {
+        if let Ok(mut limiter) = self.control_limiter.lock() {
+            let now = Instant::now();
+            let elapsed = now.duration_since(limiter.last_refill).as_secs_f64();
+            limiter.last_refill = now;
+            limiter.tokens = (limiter.tokens + elapsed * limiter.rate).min(limiter.burst);
+
+            if limiter.tokens >= 1.0 {
+                limiter.tokens -= 1.0;
+                return true;
+            }
+        }
+        false
     }
 
     /// Non-blocking send of a binary payload according to configured backpressure.
@@ -147,31 +190,6 @@ impl Conn {
             dst.try_send(msg.encode());
         } else {
             hub.send_direct_to_cluster(msg);
-        }
-    }
-
-    /// Touches cluster presence timestamp for all joined rooms if the configured interval has elapsed.
-    pub fn touch_presence(&self, hub: &Hub, interval: Duration) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let interval_ms = interval.as_millis() as u64;
-
-        let prev = self.last_touch_ms.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(prev) < interval_ms {
-            return;
-        }
-
-        if self
-            .last_touch_ms
-            .compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            let rooms = self.joined_rooms();
-            if !rooms.is_empty() {
-                hub.touch_presence(&self.id, rooms);
-            }
         }
     }
 

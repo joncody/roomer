@@ -1,12 +1,26 @@
 use crate::error::FrameError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-/// High-performance binary message packet framing.
+/// Protocol version identifier.
+pub const PROTOCOL_VERSION: u8 = 1;
+
+/// Default wire protocol flags.
+pub const DEFAULT_FLAGS: u8 = 0;
+
+/// Base header overhead in bytes:
+/// `[1B version][1B flags][2B room_len][2B event_len][1B dst_len][1B src_len][4B payload_len]`
+pub const HEADER_OVERHEAD: usize = 12;
+
+/// High-performance binary message packet framing with a 12-byte header overhead.
 ///
 /// Binary wire format:
-/// `[4B room_len][room][4B event_len][event][4B dst_len][dst][4B src_len][src][4B payload_len][payload]`
+/// `[1B version][1B flags][2B room_len][room][2B event_len][event][1B dst_len][dst][1B src_len][src][4B payload_len][payload]`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
+    /// Protocol version.
+    pub version: u8,
+    /// Bitfield flags reserved for compression, encryption, or fragmentation.
+    pub flags: u8,
     /// Target room channel name.
     pub room: String,
     /// Event name descriptor.
@@ -20,7 +34,7 @@ pub struct Message {
 }
 
 impl Message {
-    /// Creates a new `Message` instance.
+    /// Creates a new `Message` instance with protocol version 1 and zero flags.
     ///
     /// # Example
     /// ```rust
@@ -29,6 +43,7 @@ impl Message {
     ///
     /// let msg = Message::new("lobby", "chat", "", "user_1", Bytes::from_static(b"hello"));
     /// assert_eq!(msg.room, "lobby");
+    /// assert_eq!(msg.version, 1);
     /// ```
     pub fn new(
         room: impl Into<String>,
@@ -37,7 +52,30 @@ impl Message {
         src: impl Into<String>,
         payload: impl Into<Bytes>,
     ) -> Self {
+        Self::with_flags(
+            PROTOCOL_VERSION,
+            DEFAULT_FLAGS,
+            room,
+            event,
+            dst,
+            src,
+            payload,
+        )
+    }
+
+    /// Creates a new `Message` with custom version and flags.
+    pub fn with_flags(
+        version: u8,
+        flags: u8,
+        room: impl Into<String>,
+        event: impl Into<String>,
+        dst: impl Into<String>,
+        src: impl Into<String>,
+        payload: impl Into<Bytes>,
+    ) -> Self {
         Self {
+            version,
+            flags,
             room: room.into(),
             event: event.into(),
             dst: dst.into(),
@@ -106,16 +144,35 @@ impl Message {
     ///
     /// # Errors
     /// Returns `FrameError` on underflows, invalid UTF-8 fields, or trailing bytes.
-    pub fn decode_strict(mut data: Bytes) -> Result<Self, FrameError> {
-        if data.len() < 20 {
+    pub fn decode_strict(data: Bytes) -> Result<Self, FrameError> {
+        Self::decode_strict_with_limit(data, 0)
+    }
+
+    /// Decodes raw binary bytes into a `Message` enforcing an optional maximum frame limit.
+    ///
+    /// # Errors
+    /// Returns `FrameError` on size limit exceeded, underflows, invalid UTF-8 fields, or trailing bytes.
+    pub fn decode_strict_with_limit(mut data: Bytes, max_size: usize) -> Result<Self, FrameError> {
+        if data.len() < HEADER_OVERHEAD {
             return Err(FrameError::BufferUnderflow {
-                expected: 20,
+                expected: HEADER_OVERHEAD,
                 actual: data.len(),
             });
         }
 
-        // 1. Room
-        let room_len = data.get_u32() as usize;
+        if max_size > 0 && data.len() > max_size {
+            return Err(FrameError::TruncatedPayload {
+                expected: max_size,
+                actual: data.len(),
+            });
+        }
+
+        // 1. Version & Flags
+        let version = data.get_u8();
+        let flags = data.get_u8();
+
+        // 2. Room (2B length)
+        let room_len = data.get_u16() as usize;
         if data.remaining() < room_len {
             return Err(FrameError::TruncatedPayload {
                 expected: room_len,
@@ -127,14 +184,14 @@ impl Message {
             .map_err(|_| FrameError::InvalidUtf8 { field: "room" })?
             .to_string();
 
-        // 2. Event
-        if data.remaining() < 4 {
+        // 3. Event (2B length)
+        if data.remaining() < 2 {
             return Err(FrameError::BufferUnderflow {
-                expected: 4,
+                expected: 2,
                 actual: data.remaining(),
             });
         }
-        let event_len = data.get_u32() as usize;
+        let event_len = data.get_u16() as usize;
         if data.remaining() < event_len {
             return Err(FrameError::TruncatedPayload {
                 expected: event_len,
@@ -146,14 +203,14 @@ impl Message {
             .map_err(|_| FrameError::InvalidUtf8 { field: "event" })?
             .to_string();
 
-        // 3. Dst
-        if data.remaining() < 4 {
+        // 4. Dst (1B length)
+        if data.remaining() < 1 {
             return Err(FrameError::BufferUnderflow {
-                expected: 4,
+                expected: 1,
                 actual: data.remaining(),
             });
         }
-        let dst_len = data.get_u32() as usize;
+        let dst_len = data.get_u8() as usize;
         if data.remaining() < dst_len {
             return Err(FrameError::TruncatedPayload {
                 expected: dst_len,
@@ -165,14 +222,14 @@ impl Message {
             .map_err(|_| FrameError::InvalidUtf8 { field: "dst" })?
             .to_string();
 
-        // 4. Src
-        if data.remaining() < 4 {
+        // 5. Src (1B length)
+        if data.remaining() < 1 {
             return Err(FrameError::BufferUnderflow {
-                expected: 4,
+                expected: 1,
                 actual: data.remaining(),
             });
         }
-        let src_len = data.get_u32() as usize;
+        let src_len = data.get_u8() as usize;
         if data.remaining() < src_len {
             return Err(FrameError::TruncatedPayload {
                 expected: src_len,
@@ -184,7 +241,7 @@ impl Message {
             .map_err(|_| FrameError::InvalidUtf8 { field: "src" })?
             .to_string();
 
-        // 5. Payload (Zero-copy slice split directly from Bytes buffer)
+        // 6. Payload (4B length)
         if data.remaining() < 4 {
             return Err(FrameError::BufferUnderflow {
                 expected: 4,
@@ -207,6 +264,8 @@ impl Message {
         }
 
         Ok(Self {
+            version,
+            flags,
             room,
             event,
             dst,
@@ -220,14 +279,14 @@ impl Message {
         Self::decode_strict(data).ok()
     }
 
-    /// Serializes the `Message` into a single-pass, pre-allocated contiguous `Bytes` buffer.
+    /// Serializes the `Message` into a contiguous `Bytes` buffer using the 12-byte wire format.
     pub fn encode(&self) -> Bytes {
         let room_bytes = self.room.as_bytes();
         let event_bytes = self.event.as_bytes();
         let dst_bytes = self.dst.as_bytes();
         let src_bytes = self.src.as_bytes();
 
-        let total_size = 20
+        let total_size = HEADER_OVERHEAD
             + room_bytes.len()
             + event_bytes.len()
             + dst_bytes.len()
@@ -236,16 +295,19 @@ impl Message {
 
         let mut buf = BytesMut::with_capacity(total_size);
 
-        buf.put_u32(room_bytes.len() as u32);
+        buf.put_u8(self.version);
+        buf.put_u8(self.flags);
+
+        buf.put_u16(room_bytes.len() as u16);
         buf.put_slice(room_bytes);
 
-        buf.put_u32(event_bytes.len() as u32);
+        buf.put_u16(event_bytes.len() as u16);
         buf.put_slice(event_bytes);
 
-        buf.put_u32(dst_bytes.len() as u32);
+        buf.put_u8(dst_bytes.len() as u8);
         buf.put_slice(dst_bytes);
 
-        buf.put_u32(src_bytes.len() as u32);
+        buf.put_u8(src_bytes.len() as u8);
         buf.put_slice(src_bytes);
 
         buf.put_u32(self.payload.len() as u32);

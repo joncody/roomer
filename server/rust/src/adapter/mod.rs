@@ -1,4 +1,4 @@
-//! Multi-node distributed adapters (Local in-memory, Redis Pub/Sub) with presence sets and unicast routing.
+//! Multi-node distributed adapters (Local in-memory, Redis Pub/Sub) with SET presence and unicast routing.
 
 use crate::error::AdapterError;
 use crate::message::Message;
@@ -40,20 +40,14 @@ pub trait Adapter: Send + Sync + 'static {
     /// Subscribes to cluster messages and invokes the given callback.
     async fn subscribe(&self, callback: SubscribeCallback) -> Result<(), AdapterError>;
 
-    /// Adds a connection ID to a room's cluster-wide presence set.
+    /// Adds a connection ID to a room's cluster-wide presence SET and sets key expiration.
     async fn add_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError>;
 
-    /// Removes a connection ID from a room's cluster-wide presence set.
+    /// Removes a connection ID from a room's cluster-wide presence SET.
     async fn remove_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError>;
 
-    /// Retrieves all connection IDs in a room across the entire cluster.
+    /// Retrieves all connection IDs in a room across the entire cluster using SET members.
     async fn get_presence(&self, room: &str) -> Result<Vec<String>, AdapterError>;
-
-    /// Updates the last-seen heartbeat timestamp for a connection across the specified rooms.
-    async fn touch_presence(&self, conn_id: &str, rooms: &[String]) -> Result<(), AdapterError> {
-        let _ = (conn_id, rooms);
-        Ok(())
-    }
 
     /// Maps a connection ID to this node ID in the cluster registry.
     async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError>;
@@ -122,9 +116,6 @@ impl Adapter for LocalAdapter {
             .get(room)
             .map(|set| set.iter().map(|k| k.clone()).collect())
             .unwrap_or_default())
-    }
-    async fn touch_presence(&self, _conn_id: &str, _rooms: &[String]) -> Result<(), AdapterError> {
-        Ok(())
     }
     async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError> {
         self.node_map

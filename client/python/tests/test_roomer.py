@@ -1,16 +1,26 @@
 """
 Comprehensive test suite for the Roomer Python client.
-Covers wire framing, malformed input rejection, event emissions,
-room state machines, lifecycle cleanup, and async mock transports.
+Covers 12-byte wire framing, pre-allocated struct packing, malformed
+input rejection, event emissions, room state machines, and lifecycle cleanup.
 """
 
 import json
 import pytest
-from roomer import Packet, Room, RoomerClient, decode_message, encode_message, EventEmitter, roomer
+from roomer import (
+    HEADER_OVERHEAD,
+    PROTOCOL_VERSION,
+    EventEmitter,
+    Packet,
+    Room,
+    RoomerClient,
+    decode_message,
+    encode_message,
+    roomer,
+)
 
 
 # ------------------------------------------------------------------------------
-# 1. Wire Protocol & Binary Framing Tests
+# 1. Wire Protocol & Binary Framing Tests (12-Byte Overhead Contract)
 # ------------------------------------------------------------------------------
 
 def test_protocol_roundtrip_text():
@@ -24,6 +34,8 @@ def test_protocol_roundtrip_text():
 
     decoded = decode_message(original)
     assert decoded is not None
+    assert decoded.version == PROTOCOL_VERSION
+    assert decoded.flags == 0
     assert decoded.room == "lobby"
     assert decoded.event == "chat"
     assert decoded.dst == "user_dst"
@@ -43,6 +55,7 @@ def test_protocol_roundtrip_binary():
 
     decoded = decode_message(raw)
     assert decoded is not None
+    assert decoded.version == PROTOCOL_VERSION
     assert decoded.payload == payload_bin
 
 
@@ -63,10 +76,12 @@ def test_protocol_roundtrip_json():
 
 def test_protocol_empty_fields():
     raw = encode_message()
-    assert len(raw) == 20, "Empty packet must be exactly 20 header bytes"
+    assert len(raw) == HEADER_OVERHEAD, "Empty packet must be exactly 12 header bytes"
 
     decoded = decode_message(raw)
     assert decoded is not None
+    assert decoded.version == PROTOCOL_VERSION
+    assert decoded.flags == 0
     assert decoded.room == ""
     assert decoded.event == ""
     assert decoded.dst == ""
@@ -76,16 +91,43 @@ def test_protocol_empty_fields():
 
 def test_protocol_malformed_packets():
     assert decode_message(b"") is None
-    assert decode_message(b"\x00\x00\x00\x05") is None
+    assert decode_message(b"\x01\x00\x00\x05") is None
 
-    # Length specifies 50 bytes, buffer only has 25
-    truncated = bytearray(25)
-    truncated[0:4] = (50).to_bytes(4, "big")
+    # Length specifies 50 bytes for room name, buffer only has 15
+    truncated = bytearray(15)
+    truncated[0] = 1  # version
+    truncated[1] = 0  # flags
+    truncated[2:4] = (50).to_bytes(2, "big")
     assert decode_message(truncated) is None
 
     # Trailing unconsumed bytes
     valid = encode_message("r", "e", "", "", "p")
     assert decode_message(valid + b"\x01\x02\x03") is None
+
+
+def test_protocol_length_prefix_boundaries():
+    # Valid maximum lengths
+    valid_max_dst = "a" * 255
+    raw = encode_message(room="r", event="e", dst=valid_max_dst, src="", payload=b"ok")
+    decoded = decode_message(raw)
+    assert decoded is not None
+    assert decoded.dst == valid_max_dst
+
+    # Exceeding uint8 dst length (> 255)
+    with pytest.raises(ValueError, match="Destination ID exceeds maximum uint8 length"):
+        encode_message(dst="a" * 256)
+
+    # Exceeding uint8 src length (> 255)
+    with pytest.raises(ValueError, match="Source ID exceeds maximum uint8 length"):
+        encode_message(src="a" * 256)
+
+    # Exceeding uint16 room length (> 65535)
+    with pytest.raises(ValueError, match="Room name exceeds maximum uint16 length"):
+        encode_message(room="a" * 65536)
+
+    # Exceeding uint16 event length (> 65535)
+    with pytest.raises(ValueError, match="Event name exceeds maximum uint16 length"):
+        encode_message(event="a" * 65536)
 
 
 # ------------------------------------------------------------------------------
@@ -144,7 +186,9 @@ def test_room_join_ack_state_transition():
         event="join_ack",
         dst="",
         src="client_uuid_12345",
-        payload=b'["client_uuid_12345", "other_user_67890"]'
+        payload=b'["client_uuid_12345", "other_user_67890"]',
+        version=1,
+        flags=0
     )
     root.parse(join_ack)
 
@@ -155,7 +199,12 @@ def test_room_join_ack_state_transition():
 
 def test_room_member_presence_events():
     rooms = {}
-    root = Room("root", lambda *args: None, lambda n: rooms.setdefault(n, Room(n, lambda *a: None, lambda n2: None, lambda: True)), lambda: True)
+    root = Room(
+        "root",
+        lambda *args: None,
+        lambda n: rooms.setdefault(n, Room(n, lambda *a: None, lambda n2: None, lambda: True)),
+        lambda: True
+    )
     root._is_open = True
     root._member_id = "self_id"
     root._members = ["self_id"]

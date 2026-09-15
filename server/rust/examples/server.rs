@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hub = Hub::new();
     let mut clustered = false;
 
-    // 1. Connect Redis Adapter if redis-adapter feature is enabled and REDIS_URL or REDIS_ADDR is present
+    // 1. Connect Redis Adapter (SET presence with auto-expiration)
     #[cfg(feature = "redis-adapter")]
     if let Ok(redis_url) = std::env::var("REDIS_URL").or_else(|_| std::env::var("REDIS_ADDR")) {
         let mut formatted_url = redis_url.clone();
@@ -47,11 +47,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Connecting to Redis cluster at {}", formatted_url);
         match RedisAdapter::builder(&formatted_url)
             .prefix(&prefix)
+            .presence_ttl(std::time::Duration::from_secs(86400))
             .build()
         {
             Ok(adapter) => {
                 hub.configure(Arc::new(adapter), metrics).await;
-                info!("Configured Redis cluster adapter");
+                info!("Configured Redis cluster adapter with SET presence");
                 clustered = true;
             }
             Err(err) => {
@@ -64,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Running in standalone single-node mode");
     }
 
-    // 2. Register "chat" broadcast handler (debug! prevents stdout lock contention during high-throughput bursts)
+    // 2. Register "chat" broadcast handler
     let hub_chat = hub.clone();
     hub.register_handler(
         "chat",
@@ -95,10 +96,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
 
+    // 4. Configure AppState with 12-byte wire framing, channel buffer, and rate limits
     let state = AppState::new(hub.clone()).with_config(
         ServerConfig::default()
             .with_channel_capacity(8192)
-            .with_max_message_size(16 * 1024 * 1024),
+            .with_max_message_size(16 * 1024 * 1024)
+            .with_control_rate_limit(10.0, 20),
     );
 
     // Resolve static asset paths dynamically across root, subfolder, and container execution

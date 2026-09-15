@@ -1,12 +1,17 @@
 FROM node:26-alpine
 
+# Declare unused BuildKit build arguments passed by docker-compose to silence warnings
+ARG EXAMPLE=""
+ARG FEATURES=""
+
 WORKDIR /app
 
 # 1. Copy package definitions first for layer caching
 COPY server/node/package*.json ./server/node/
 
 WORKDIR /app/server/node
-RUN npm install --omit=dev
+# Install dependencies including ioredis (required for Redis clustering)
+RUN npm install
 
 WORKDIR /app
 
@@ -21,6 +26,6 @@ WORKDIR /app/server/node
 ENV NODE_ENV=production
 ENV PORT=8080
 
-EXPOSE 8080
+EXPOSE 8080 8081
 
 CMD ["node", "examples/main.js"]

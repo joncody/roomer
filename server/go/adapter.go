@@ -16,17 +16,14 @@ type Adapter interface {
 	// Subscribe listens for messages published from other nodes and dispatches them locally.
 	Subscribe(handler func(channel string, msg *Message)) error
 
-	// AddPresence adds a connection ID to a room's cluster-wide presence set.
+	// AddPresence adds a connection ID to a room's cluster-wide presence set (SET) and applies key expiration.
 	AddPresence(ctx context.Context, room, connID string) error
 
-	// RemovePresence removes a connection ID from a room's cluster-wide presence set.
+	// RemovePresence removes a connection ID from a room's cluster-wide presence set (SET).
 	RemovePresence(ctx context.Context, room, connID string) error
 
-	// GetPresence retrieves all connection IDs in a room across the entire cluster.
+	// GetPresence retrieves all connection IDs in a room across the entire cluster using SET members.
 	GetPresence(ctx context.Context, room string) ([]string, error)
-
-	// TouchPresence updates the last-seen heartbeat timestamp for a connection in the specified rooms.
-	TouchPresence(ctx context.Context, connID string, rooms []string) error
 
 	// RegisterNode maps a connection ID to this node ID in the cluster registry.
 	RegisterNode(ctx context.Context, connID string) error
@@ -107,10 +104,6 @@ func (a *localAdapter) GetPresence(ctx context.Context, room string) ([]string, 
 		members = append(members, id)
 	}
 	return members, nil
-}
-
-func (a *localAdapter) TouchPresence(ctx context.Context, connID string, rooms []string) error {
-	return nil
 }
 
 func (a *localAdapter) RegisterNode(ctx context.Context, connID string) error {

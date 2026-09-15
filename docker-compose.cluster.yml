@@ -1,7 +1,7 @@
 services:
   redis:
     image: redis:alpine
-    container_name: roomer-go-redis
+    container_name: roomer-cluster-redis
     ports:
       - "6379:6379"
     restart: unless-stopped
@@ -13,17 +13,18 @@ services:
 
   node1:
     build:
-      context: ../..  # This MUST point to the monorepo root
-      dockerfile: server/go/Dockerfile
+      context: .
+      dockerfile: server/${NODE1:-go}/Dockerfile
       args:
         EXAMPLE: server
         FEATURES: redis-adapter
-    container_name: roomer-go-node1
+    container_name: roomer-cluster-node1
     environment:
       - "PORT=8080"
       - "REDIS_ADDR=redis:6379"
       - "REDIS_URL=redis://redis:6379"
       - "REDIS_PREFIX=roomer:demo:"
+      - "RUST_LOG=info"
     ports:
       - "8080:8080"
     depends_on:
@@ -33,17 +34,18 @@ services:
 
   node2:
     build:
-      context: ../..  # This MUST point to the monorepo root
-      dockerfile: server/go/Dockerfile
+      context: .
+      dockerfile: server/${NODE2:-rust}/Dockerfile
       args:
         EXAMPLE: server
         FEATURES: redis-adapter
-    container_name: roomer-go-node2
+    container_name: roomer-cluster-node2
     environment:
       - "PORT=8081"
       - "REDIS_ADDR=redis:6379"
       - "REDIS_URL=redis://redis:6379"
       - "REDIS_PREFIX=roomer:demo:"
+      - "RUST_LOG=info"
     ports:
       - "8081:8081"
     depends_on:

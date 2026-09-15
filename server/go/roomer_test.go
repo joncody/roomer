@@ -27,7 +27,7 @@ func TestShard_CacheLinePadding(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 2. Message Encoding & Framing Tests
+// 2. 12-Byte Header Message Encoding & Framing Tests
 // -----------------------------------------------------------------------------
 
 func TestMessage_Roundtrip(t *testing.T) {
@@ -39,6 +39,12 @@ func TestMessage_Roundtrip(t *testing.T) {
 		t.Fatalf("expected message to decode successfully, got nil")
 	}
 
+	if decoded.Version != CurrentProtocolVersion {
+		t.Errorf("expected Version %d, got %d", CurrentProtocolVersion, decoded.Version)
+	}
+	if decoded.Flags != 0 {
+		t.Errorf("expected Flags 0, got %d", decoded.Flags)
+	}
 	if decoded.Room != original.Room {
 		t.Errorf("expected Room %q, got %q", original.Room, decoded.Room)
 	}
@@ -82,20 +88,22 @@ func TestMessage_JSONHelpers(t *testing.T) {
 }
 
 func TestMessage_MalformedInput(t *testing.T) {
-	if msg := BytesToMessage([]byte{1, 2, 3}); msg != nil {
+	// Underflow: less than 12-byte header overhead
+	if msg := BytesToMessage([]byte{1, 0, 0, 0}); msg != nil {
 		t.Errorf("expected nil for short payload, got %+v", msg)
 	}
 
+	// Truncated payload length header
 	corrupted := []byte{
-		0, 0, 0, 255,
-		'a', 'b', 'c', 'd',
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
-		0, 0, 0, 0,
+		1, 0, // version, flags
+		0, 4, 'a', 'b', 'c', 'd', // room (len 4)
+		0, 0, // event (len 0)
+		0,    // dst (len 0)
+		0,    // src (len 0)
+		0, 0, 0, 50, // payload claims 50 bytes, but ends here
 	}
 	if msg := BytesToMessage(corrupted); msg != nil {
-		t.Errorf("expected nil for length out of bounds, got %+v", msg)
+		t.Errorf("expected nil for truncated payload, got %+v", msg)
 	}
 }
 
@@ -124,7 +132,7 @@ func TestRegisterHandler_ReservedAndDuplicateGuards(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 4. Backpressure Policy & Presence Heartbeat Tests
+// 4. Backpressure Policy & Token-Bucket Rate Limiter Tests
 // -----------------------------------------------------------------------------
 
 func TestConn_BackpressureStrategies(t *testing.T) {
@@ -182,31 +190,32 @@ func TestConn_BackpressureStrategies(t *testing.T) {
 	}
 }
 
-func TestConn_PresenceHeartbeatTouchThrottling(t *testing.T) {
-	h := NewHub()
+func TestConn_TokenBucketRateLimiter(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.PresenceTouchInterval = 100 * time.Millisecond
+	cfg.ControlRateLimit = 5.0 // 5 tokens/sec
+	cfg.ControlBurst = 3       // max burst of 3
 
 	c := &Conn{
-		ID:        "touch_test_conn",
-		hub:       h,
-		send:      make(chan []byte, 10),
-		done:      make(chan struct{}),
-		rooms:     make(map[string]struct{}),
-		config:    cfg,
-		lastTouch: time.Now().Add(-200 * time.Millisecond),
+		ID:            "limiter_conn",
+		config:        cfg,
+		controlTokens: 3.0,
+		controlLast:   time.Now(),
 	}
-	h.addConn(c)
-	h.joinRoom("touch_room", c)
 
-	// First touch triggers score update
-	c.touchPresence()
-	firstTouch := c.lastTouch
+	// 3 immediate events consume burst
+	if !c.allowControlEvent() {
+		t.Errorf("expected token 1 to be allowed")
+	}
+	if !c.allowControlEvent() {
+		t.Errorf("expected token 2 to be allowed")
+	}
+	if !c.allowControlEvent() {
+		t.Errorf("expected token 3 to be allowed")
+	}
 
-	// Immediate second touch is throttled
-	c.touchPresence()
-	if c.lastTouch != firstTouch {
-		t.Errorf("touchPresence should have been throttled within interval")
+	// 4th immediate event must be rejected
+	if c.allowControlEvent() {
+		t.Errorf("expected 4th event to be rate-limited")
 	}
 }
 
@@ -232,12 +241,14 @@ func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
 				roomName := fmt.Sprintf("room_%d", (workerID+i)%5)
 
 				c := &Conn{
-					ID:     connID,
-					hub:    h,
-					send:   make(chan []byte, 256),
-					done:   make(chan struct{}),
-					rooms:  make(map[string]struct{}),
-					config: DefaultConfig(),
+					ID:            connID,
+					hub:           h,
+					send:          make(chan []byte, 256),
+					done:          make(chan struct{}),
+					rooms:         make(map[string]struct{}),
+					config:        DefaultConfig(),
+					controlTokens: 20.0,
+					controlLast:   time.Now(),
 				}
 
 				// Consumer goroutine
@@ -281,12 +292,14 @@ func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
 func TestHub_GracefulShutdown(t *testing.T) {
 	h := NewHub()
 	c := &Conn{
-		ID:     "shutdown_test_conn",
-		hub:    h,
-		send:   make(chan []byte, 10),
-		done:   make(chan struct{}),
-		rooms:  make(map[string]struct{}),
-		config: DefaultConfig(),
+		ID:            "shutdown_test_conn",
+		hub:           h,
+		send:          make(chan []byte, 10),
+		done:          make(chan struct{}),
+		rooms:         make(map[string]struct{}),
+		config:        DefaultConfig(),
+		controlTokens: 20.0,
+		controlLast:   time.Now(),
 	}
 
 	h.addConn(c)
@@ -337,12 +350,14 @@ func BenchmarkRoom_Emit_1000Conns(b *testing.B) {
 	conns := make([]*Conn, 1000)
 	for i := 0; i < 1000; i++ {
 		c := &Conn{
-			ID:     fmt.Sprintf("user_%d", i),
-			hub:    h,
-			send:   make(chan []byte, 2048),
-			done:   make(chan struct{}),
-			rooms:  make(map[string]struct{}),
-			config: DefaultConfig(),
+			ID:            fmt.Sprintf("user_%d", i),
+			hub:           h,
+			send:          make(chan []byte, 2048),
+			done:          make(chan struct{}),
+			rooms:         make(map[string]struct{}),
+			config:        DefaultConfig(),
+			controlTokens: 20.0,
+			controlLast:   time.Now(),
 		}
 		r.addMember(c)
 		conns[i] = c

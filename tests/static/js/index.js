@@ -125,6 +125,11 @@ function create_test_runner() {
     });
 }
 
+/**
+ * Encodes a message using the 12-byte binary wire framing format:
+ * [1B Version][1B Flags][2B RoomLen][Room][2B EventLen][Event]
+ * [1B DstLen][Dst][1B SrcLen][Src][4B PayloadLen][Payload]
+ */
 function encode_packet(room, event, dst, src, payload_str) {
     const encoder = new TextEncoder();
     const room_bytes = encoder.encode(room);
@@ -133,22 +138,24 @@ function encode_packet(room, event, dst, src, payload_str) {
     const src_bytes = encoder.encode(src);
     const payload_bytes = encoder.encode(payload_str);
     const total_bytes = (
+        12 +
         room_bytes.byteLength +
         event_bytes.byteLength +
         dst_bytes.byteLength +
         src_bytes.byteLength +
-        payload_bytes.byteLength +
-        20
+        payload_bytes.byteLength
     );
 
     const data = bytecursor(new ArrayBuffer(total_bytes));
-    data.writeUint32(room_bytes.byteLength);
+    data.writeUint8(1); // Protocol Version: 1
+    data.writeUint8(0); // Flags: 0
+    data.writeUint16(room_bytes.byteLength);
     data.writeBytes(room_bytes);
-    data.writeUint32(event_bytes.byteLength);
+    data.writeUint16(event_bytes.byteLength);
     data.writeBytes(event_bytes);
-    data.writeUint32(dst_bytes.byteLength);
+    data.writeUint8(dst_bytes.byteLength);
     data.writeBytes(dst_bytes);
-    data.writeUint32(src_bytes.byteLength);
+    data.writeUint8(src_bytes.byteLength);
     data.writeBytes(src_bytes);
     data.writeUint32(payload_bytes.byteLength);
     data.writeBytes(payload_bytes);
@@ -157,20 +164,27 @@ function encode_packet(room, event, dst, src, payload_str) {
     return data.getBytes().buffer;
 }
 
+/**
+ * Decodes a 12-byte wire frame buffer.
+ */
 function parse_packet_data(buffer) {
     const data = bytecursor(buffer);
-    const room_str = data.getString(data.getUint32());
-    const event_str = data.getString(data.getUint32());
-    const dst_str = data.getString(data.getUint32());
-    const src_str = data.getString(data.getUint32());
+    const version = data.getUint8();
+    const flags = data.getUint8();
+    const room_str = data.getString(data.getUint16());
+    const event_str = data.getString(data.getUint16());
+    const dst_str = data.getString(data.getUint8());
+    const src_str = data.getString(data.getUint8());
     const payload_bytes = data.getBytes(data.getUint32());
 
     return {
         dst: dst_str,
         event: event_str,
+        flags,
         payload: payload_bytes,
         room: room_str,
-        src: src_str
+        src: src_str,
+        version
     };
 }
 
@@ -225,9 +239,9 @@ function run_all_tests() {
     );
 
     // -------------------------------------------------------------------------
-    // GROUP 3: Packet Parsing & State Transitions
+    // GROUP 3: 12-Byte Packet Parsing & State Transitions
     // -------------------------------------------------------------------------
-    runner.group("3. Packet Parsing & State Transitions");
+    runner.group("3. 12-Byte Packet Parsing & State Transitions");
 
     let open_fired = false;
     root.on("open", function () {
@@ -243,6 +257,10 @@ function run_all_tests() {
     );
 
     const packet = parse_packet_data(join_ack_buffer);
+    runner.assert(
+        packet.version === 1 && packet.flags === 0,
+        "Packet decoded version (1) and flags (0) successfully"
+    );
     root.parse(packet);
 
     runner.assert(

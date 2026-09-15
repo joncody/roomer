@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -58,7 +59,6 @@ func getEnv(key, defaultVal string) string {
 
 func main() {
 	port := getEnv("PORT", "8080")
-	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
 	redisPrefix := getEnv("REDIS_PREFIX", "roomer:demo:")
 
 	// 1. Structured Logger
@@ -75,10 +75,25 @@ func main() {
 		logger.Warn("Could not parse index template", "path", templatePath, "err", tErr)
 	}
 
-	// 2. Connect Redis Adapter
-	rdb := redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
+	// 2. Connect Redis Adapter (supports both REDIS_URL and REDIS_ADDR with automatic expiration)
+	redisEndpoint := os.Getenv("REDIS_URL")
+	if redisEndpoint == "" {
+		redisEndpoint = getEnv("REDIS_ADDR", "localhost:6379")
+	}
+
+	var rdb redis.UniversalClient
+	if strings.HasPrefix(redisEndpoint, "redis://") || strings.HasPrefix(redisEndpoint, "rediss://") {
+		if opt, err := redis.ParseURL(redisEndpoint); err == nil {
+			rdb = redis.NewClient(opt)
+		} else {
+			logger.Warn("Failed to parse REDIS_URL, falling back to direct address", "err", err)
+			rdb = redis.NewClient(&redis.Options{Addr: redisEndpoint})
+		}
+	} else {
+		rdb = redis.NewClient(&redis.Options{
+			Addr: redisEndpoint,
+		})
+	}
 
 	// Test connection
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -127,10 +142,11 @@ func main() {
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 	http.Handle("/tests/", http.StripPrefix("/tests/", http.FileServer(http.Dir(testsDir))))
 
-	// 5. Mount WebSocket handler with 8,192 Channel Capacity
+	// 5. Mount WebSocket handler with 8,192 Channel Capacity and token-bucket control rate limiting
 	opts := []roomer.Option{
 		roomer.WithLogger(logger),
 		roomer.WithChannelCapacity(8192),
+		roomer.WithControlRateLimit(10.0, 20),
 	}
 	if adapter != nil {
 		opts = append(opts, roomer.WithAdapter(adapter))

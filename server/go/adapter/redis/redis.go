@@ -18,7 +18,7 @@ import (
 // Ensure Adapter implements roomer.Adapter at compile time.
 var _ roomer.Adapter = (*Adapter)(nil)
 
-// Adapter implements roomer.Adapter using Redis Pub/Sub with loopback suppression, presence sets, and unicast routing.
+// Adapter implements roomer.Adapter using Redis Pub/Sub with loopback suppression, SET presence, and unicast routing.
 type Adapter struct {
 	client         goredis.UniversalClient
 	nodeID         string
@@ -215,49 +215,31 @@ func (a *Adapter) PublishDirect(ctx context.Context, targetNodeID string, msg *r
 	return a.client.Publish(pubCtx, channel, envelope).Err()
 }
 
-// AddPresence adds a connection ID to a room's cluster-wide presence set using sorted sets for eviction.
+// AddPresence adds a connection ID to a room's cluster-wide presence SET and applies key expiration to auto-evict abandoned rooms.
 func (a *Adapter) AddPresence(ctx context.Context, room, connID string) error {
 	key := a.prefix + "presence:" + room
-	now := float64(time.Now().Unix())
-	return a.client.ZAdd(ctx, key, goredis.Z{Score: now, Member: connID}).Err()
-}
-
-// RemovePresence removes a connection ID from a room's cluster-wide presence set.
-func (a *Adapter) RemovePresence(ctx context.Context, room, connID string) error {
-	key := a.prefix + "presence:" + room
-	return a.client.ZRem(ctx, key, connID).Err()
-}
-
-// GetPresence retrieves all connection IDs in a room across the cluster, pruning expired entries.
-func (a *Adapter) GetPresence(ctx context.Context, room string) ([]string, error) {
-	key := a.prefix + "presence:" + room
-	now := time.Now().Unix()
 	ttl := a.presenceTTL
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
-	minScore := fmt.Sprintf("%d", now-int64(ttl.Seconds()))
 
-	_ = a.client.ZRemRangeByScore(ctx, key, "-inf", minScore).Err()
-	return a.client.ZRangeByScore(ctx, key, &goredis.ZRangeBy{
-		Min: minScore,
-		Max: "+inf",
-	}).Result()
-}
-
-// TouchPresence updates the last-seen heartbeat timestamp for a connection across rooms in a single pipeline.
-func (a *Adapter) TouchPresence(ctx context.Context, connID string, rooms []string) error {
-	if len(rooms) == 0 {
-		return nil
-	}
-	now := float64(time.Now().Unix())
 	pipe := a.client.Pipeline()
-	for _, room := range rooms {
-		key := a.prefix + "presence:" + room
-		pipe.ZAdd(ctx, key, goredis.Z{Score: now, Member: connID})
-	}
+	pipe.SAdd(ctx, key, connID)
+	pipe.Expire(ctx, key, ttl)
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+// RemovePresence removes a connection ID from a room's cluster-wide presence SET.
+func (a *Adapter) RemovePresence(ctx context.Context, room, connID string) error {
+	key := a.prefix + "presence:" + room
+	return a.client.SRem(ctx, key, connID).Err()
+}
+
+// GetPresence retrieves all connection IDs in a room across the cluster using SMEMBERS.
+func (a *Adapter) GetPresence(ctx context.Context, room string) ([]string, error) {
+	key := a.prefix + "presence:" + room
+	return a.client.SMembers(ctx, key).Result()
 }
 
 // RegisterNode maps a connection ID to this node ID with a 24-hour expiration.
@@ -433,7 +415,7 @@ func (a *Adapter) handleIncoming(m *goredis.Message, handler func(channel string
 		return
 	}
 
-	// Decode the roomer packet
+	// Decode the roomer packet using 12-byte wire format
 	packet := roomer.BytesToMessage(rawMsg)
 	if packet == nil {
 		if a.logger != nil {

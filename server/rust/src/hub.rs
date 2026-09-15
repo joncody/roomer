@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::error;
+use tracing::{error, warn};
 
 /// Reserved protocol event names.
 pub const RESERVED_EVENTS: &[&str] = &[
@@ -169,7 +169,7 @@ impl Hub {
         self.rooms.get(name).map(|r| r.value().clone())
     }
 
-    /// Atomically joins a connection into a room, updating cluster presence.
+    /// Atomically joins a connection into a room, updating cluster SET presence.
     pub fn join_room(&self, name: &str, conn: Arc<Conn>) {
         let room = self
             .rooms
@@ -204,7 +204,7 @@ impl Hub {
         self.broadcast_room(Some(&conn.id), new_member_msg);
     }
 
-    /// Removes a connection from a specific room and cleans up empty rooms and presence.
+    /// Removes a connection from a specific room and cleans up empty rooms and SET presence.
     pub fn leave_room(&self, name: &str, conn: &Arc<Conn>) {
         conn.untrack_room(name);
         if let Some(room) = self.get_room(name) {
@@ -241,22 +241,7 @@ impl Hub {
         }
     }
 
-    /// Touches presence heartbeat timestamp for a connection in the specified rooms.
-    pub fn touch_presence(&self, conn_id: &str, rooms: Vec<String>) {
-        if rooms.is_empty() {
-            return;
-        }
-        let adapter_lock = self.adapter.clone();
-        let conn_id = conn_id.to_string();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                let adapter = adapter_lock.read().await;
-                let _ = adapter.touch_presence(&conn_id, &rooms).await;
-            });
-        }
-    }
-
-    /// Retrieves all member connection IDs in a room across the entire cluster.
+    /// Retrieves all member connection IDs in a room across the entire cluster using SMEMBERS.
     pub async fn get_cluster_presence(&self, room_name: &str) -> Vec<String> {
         let mut member_set = HashSet::new();
 
@@ -319,12 +304,16 @@ impl Hub {
         }
     }
 
-    /// Routes and dispatches an incoming packet.
+    /// Routes and dispatches an incoming packet with token-bucket rate limiting for join/leave.
     pub async fn dispatch(&self, conn: Arc<Conn>, mut msg: Message) {
         msg.src = conn.id.clone();
 
         match msg.event.as_str() {
             "join" => {
+                if !conn.allow_control_event() {
+                    warn!(conn_id = %conn.id, "Control-plane rate limit exceeded for join");
+                    return;
+                }
                 self.join_room(&msg.room, conn.clone());
                 let snap = self.get_cluster_presence(&msg.room).await;
                 let members_json = serde_json::to_vec(&snap).unwrap_or_else(|_| b"[]".to_vec());
@@ -338,6 +327,10 @@ impl Hub {
                 conn.try_send(ack.encode());
             }
             "leave" => {
+                if !conn.allow_control_event() {
+                    warn!(conn_id = %conn.id, "Control-plane rate limit exceeded for leave");
+                    return;
+                }
                 self.leave_room(&msg.room, &conn);
                 let ack = Message::new(
                     &msg.room,

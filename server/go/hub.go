@@ -271,21 +271,6 @@ func (h *Hub) leaveAllRooms(c *Conn) {
 	}
 }
 
-// touchPresence updates the presence heartbeat score for a connection in its joined rooms asynchronously.
-func (h *Hub) touchPresence(connID string, rooms []string) {
-	h.cfgMu.RLock()
-	adapter := h.adapter
-	h.cfgMu.RUnlock()
-
-	if adapter != nil && len(rooms) > 0 {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			_ = adapter.TouchPresence(ctx, connID, rooms)
-		}()
-	}
-}
-
 // getClusterPresence retrieves all member IDs in a room across the entire cluster.
 func (h *Hub) getClusterPresence(roomName string) []string {
 	memberMap := make(map[string]struct{})

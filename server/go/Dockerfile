@@ -1,12 +1,16 @@
 # Build Stage
 FROM golang:1.26-alpine AS builder
 
+# Declare unused BuildKit build arguments passed by docker-compose to silence warnings
+ARG EXAMPLE=""
+ARG FEATURES=""
+
 WORKDIR /app
 
 COPY . .
 
 WORKDIR /app/server/go
-RUN go build -ldflags="-s -w" -o /app/server_bin ./examples/main.go
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /app/server_bin ./examples/main.go
 
 # Production Runner Stage
 FROM alpine:3.20

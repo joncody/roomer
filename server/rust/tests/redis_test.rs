@@ -25,10 +25,11 @@ mod redis_tests {
         assert_eq!(sender_node, node_id);
         let decoded_msg = Message::decode(payload_data).expect("message should decode");
         assert_eq!(decoded_msg, original_msg);
+        assert_eq!(decoded_msg.version, 1);
     }
 
     #[tokio::test]
-    async fn test_live_redis_two_node_sync_and_presence() {
+    async fn test_live_redis_two_node_sync_and_set_presence() {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
 
@@ -36,22 +37,28 @@ mod redis_tests {
             Ok(c) => c,
             Err(_) => return,
         };
-        if client.get_multiplexed_async_connection().await.is_err() {
-            eprintln!("Skipping live Redis test: Redis not reachable at {redis_url}");
-            return;
-        }
+        let mut conn = match client.get_multiplexed_async_connection().await {
+            Ok(conn) => conn,
+            Err(_) => {
+                eprintln!("Skipping live Redis test: Redis not reachable at {redis_url}");
+                return;
+            }
+        };
 
         let prefix = format!("roomer:test:{}:", uuid::Uuid::new_v4());
+        let presence_ttl = Duration::from_secs(180);
 
         let node_a = RedisAdapter::builder(&redis_url)
             .node_id("node_A")
             .prefix(&prefix)
+            .presence_ttl(presence_ttl)
             .build()
             .unwrap();
 
         let node_b = RedisAdapter::builder(&redis_url)
             .node_id("node_B")
             .prefix(&prefix)
+            .presence_ttl(presence_ttl)
             .build()
             .unwrap();
 
@@ -74,7 +81,7 @@ mod redis_tests {
             .await
             .unwrap();
 
-        // 1. Verify Cluster Presence Sync & Pipelined Heartbeat Touch
+        // 1. Verify Cluster SET Presence Sync and Key Expiration
         node_a.add_presence("lobby", "client_on_A").await.unwrap();
         node_b.add_presence("lobby", "client_on_B").await.unwrap();
 
@@ -87,13 +94,17 @@ mod redis_tests {
         assert!(presence.contains(&"client_on_A".to_string()));
         assert!(presence.contains(&"client_on_B".to_string()));
 
-        // Pipelined presence touch across rooms
-        node_a
-            .touch_presence("client_on_A", &["lobby".into(), "room_touch".into()])
+        // Verify key TTL in Redis
+        let key = format!("{}presence:lobby", prefix);
+        let ttl: i64 = ::redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut conn)
             .await
             .unwrap();
-        let touch_presence = node_a.get_presence("room_touch").await.unwrap();
-        assert_eq!(touch_presence, vec!["client_on_A".to_string()]);
+        assert!(
+            ttl > 0 && ttl <= 180,
+            "Presence key must have valid TTL expiration"
+        );
 
         // 2. Verify Node Registry
         node_b.register_node("client_on_B").await.unwrap();
@@ -129,7 +140,7 @@ mod redis_tests {
             "Node A must receive 0 (loopback suppressed)"
         );
 
-        // Cleanup presence
+        // 4. Remove presence via SREM
         node_a
             .remove_presence("lobby", "client_on_A")
             .await
@@ -139,6 +150,9 @@ mod redis_tests {
             .await
             .unwrap();
         node_b.unregister_node("client_on_B").await.unwrap();
+
+        let presence_after = node_a.get_presence("lobby").await.unwrap();
+        assert!(presence_after.is_empty());
 
         node_a.close().await.unwrap();
         node_b.close().await.unwrap();
@@ -160,7 +174,6 @@ mod redis_tests {
 
         let prefix = format!("roomer:unicast:{}:", uuid::Uuid::new_v4());
 
-        // Sender, Target, and Bystander nodes
         let node_sender = RedisAdapter::builder(&redis_url)
             .node_id("node_sender")
             .prefix(&prefix)

@@ -61,7 +61,7 @@ func main() {
 				log.Fatalf("Failed to connect client to %s: %v", url, err)
 			}
 
-			// Send binary join message to isolated room
+			// Send 12-byte wire binary join message to isolated room
 			joinMsg := roomer.NewMessage(targetRoom, "join", "", "", nil)
 			if err := c.WriteMessage(websocket.BinaryMessage, joinMsg.Bytes()); err != nil {
 				log.Fatalf("Failed to send join: %v", err)

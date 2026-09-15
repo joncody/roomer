@@ -1,6 +1,6 @@
 /**
- * @fileoverview WebSocket connection handle with high-throughput native
- * kernel backpressure monitoring and zero-delay binary dispatching.
+ * @fileoverview WebSocket connection handle with token-bucket control-plane rate
+ * limiting, native kernel backpressure monitoring, and zero-delay binary dispatching.
  */
 
 import { WebSocket } from "ws";
@@ -21,10 +21,11 @@ const BACKPRESSURE = Object.freeze({
  * @param {object} [claims] - Authenticated handshake claims.
  * @param {number} [capacity=8192] - Max queued frames buffer ceiling.
  * @param {number} [backpressure=0] - Backpressure strategy enum.
- * @param {number} [presence_touch_interval=54000] - Minimum presence heartbeat touch interval in ms.
+ * @param {number} [control_rate_limit=10] - Token-bucket refill rate for control events (tokens/sec).
+ * @param {number} [control_burst=20] - Token-bucket max burst capacity for control events.
  * @returns {Readonly<object>} Frozen connection instance.
  */
-function create_conn(id, ws, hub, claims, capacity, backpressure, presence_touch_interval) {
+function create_conn(id, ws, hub, claims, capacity, backpressure, control_rate_limit, control_burst) {
     const conn_claims = (
         typeof claims === "object" && claims !== null
         ? claims
@@ -44,16 +45,23 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, presence_touch
         : BACKPRESSURE.DROP_SLOW_CLIENT
     );
 
-    const touch_interval_ms = (
-        typeof presence_touch_interval === "number" && presence_touch_interval > 0
-        ? presence_touch_interval
-        : 54000
+    const control_rate = (
+        typeof control_rate_limit === "number" && control_rate_limit > 0
+        ? control_rate_limit
+        : 10.0
+    );
+
+    const control_burst_val = (
+        typeof control_burst === "number" && control_burst > 0
+        ? control_burst
+        : 20
     );
 
     const rooms = Object.create(null);
     let is_closed = false;
     let is_alive = true;
-    let last_touch_ms = Date.now();
+    let control_tokens = control_burst_val;
+    let last_control_check = Date.now();
     let self;
 
     // Disable Nagle's algorithm for sub-millisecond real-time frame delivery
@@ -82,24 +90,30 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, presence_touch
         return Object.keys(rooms);
     }
 
-    function touch_presence(interval_ms) {
-        const min_interval = (
-            typeof interval_ms === "number" && interval_ms > 0
-            ? interval_ms
-            : touch_interval_ms
-        );
+    /**
+     * Evaluates token-bucket rate limiter for control-plane requests (join/leave).
+     *
+     * @returns {boolean} True if event is allowed, false if rate limited.
+     */
+    function allow_control_event() {
         const now = Date.now();
-        if (now - last_touch_ms < min_interval) {
-            return;
+        const elapsed_sec = (now - last_control_check) / 1000;
+        last_control_check = now;
+
+        control_tokens += elapsed_sec * control_rate;
+        if (control_tokens > control_burst_val) {
+            control_tokens = control_burst_val;
         }
-        last_touch_ms = now;
-        const joined = joined_rooms();
-        if (joined.length > 0 && typeof hub.touch_presence === "function") {
-            hub.touch_presence(id, joined);
+
+        if (control_tokens >= 1.0) {
+            control_tokens -= 1.0;
+            return true;
         }
+
+        return false;
     }
 
-    // Heartbeat pong tracking & presence touch
+    // Heartbeat pong tracking
     if (
         ws !== null &&
         typeof ws === "object" &&
@@ -107,7 +121,6 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, presence_touch
     ) {
         ws.on("pong", function () {
             is_alive = true;
-            touch_presence(touch_interval_ms);
         });
     }
 
@@ -183,6 +196,7 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, presence_touch
     }
 
     self = Object.freeze({
+        allow_control_event,
         check_heartbeat,
         claims: Object.freeze(conn_claims),
         cleanup,
@@ -191,7 +205,6 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, presence_touch
         joined_rooms,
         send_to_client,
         send_to_room,
-        touch_presence,
         track_room,
         try_send,
         untrack_room,

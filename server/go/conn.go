@@ -11,21 +11,22 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Conn represents a single WebSocket connection with metadata and messaging channels.
+// Conn represents a single WebSocket connection with metadata, messaging channels, and rate limiting.
 type Conn struct {
-	ID          string
-	Claims      map[string]string // Authenticated claims (e.g., user ID, roles)
-	hub         *Hub
-	send        chan []byte // Outbound message queue
-	socket      *websocket.Conn
-	cleanupOnce sync.Once
-	done        chan struct{}
-	cleaningUp  int32
-	roomsMu     sync.RWMutex
-	rooms       map[string]struct{} // Set of joined room names
-	config      Config
-	touchMu     sync.Mutex
-	lastTouch   time.Time
+	ID            string
+	Claims        map[string]string // Authenticated claims (e.g., user ID, roles)
+	hub           *Hub
+	send          chan []byte // Outbound message queue
+	socket        *websocket.Conn
+	cleanupOnce   sync.Once
+	done          chan struct{}
+	cleaningUp    int32
+	roomsMu       sync.RWMutex
+	rooms         map[string]struct{} // Set of joined room names
+	config        Config
+	controlMu     sync.Mutex
+	controlTokens float64
+	controlLast   time.Time
 }
 
 func (c *Conn) trackRoom(room string) bool {
@@ -67,6 +68,40 @@ func (c *Conn) IsInRoom(room string) bool {
 	defer c.roomsMu.RUnlock()
 	_, ok := c.rooms[room]
 	return ok
+}
+
+// allowControlEvent evaluates the token-bucket rate limiter for control-plane requests (join/leave).
+func (c *Conn) allowControlEvent() bool {
+	c.controlMu.Lock()
+	defer c.controlMu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(c.controlLast).Seconds()
+	c.controlLast = now
+
+	rate := c.config.ControlRateLimit
+	if rate <= 0 {
+		rate = 10.0 // default 10 operations per second
+	}
+	burst := float64(c.config.ControlBurst)
+	if burst <= 0 {
+		burst = 20.0 // default burst of 20
+	}
+
+	c.controlTokens += elapsed * rate
+	if c.controlTokens > burst {
+		c.controlTokens = burst
+	}
+
+	if c.controlTokens >= 1.0 {
+		c.controlTokens -= 1.0
+		return true
+	}
+
+	if c.config.Logger != nil {
+		c.config.Logger.Warn("Control-plane rate limit exceeded for connection", "conn_id", c.ID)
+	}
+	return false
 }
 
 // TrySend attempts to send a binary message according to the configured BackpressureStrategy.
@@ -145,28 +180,6 @@ func (c *Conn) SendToClient(dstID, event string, payload []byte) {
 	}
 }
 
-// touchPresence updates the presence heartbeat score across joined rooms if interval has elapsed.
-func (c *Conn) touchPresence() {
-	interval := c.config.PresenceTouchInterval
-	if interval <= 0 {
-		interval = 54 * time.Second
-	}
-
-	c.touchMu.Lock()
-	now := time.Now()
-	if !c.lastTouch.IsZero() && now.Sub(c.lastTouch) < interval {
-		c.touchMu.Unlock()
-		return
-	}
-	c.lastTouch = now
-	c.touchMu.Unlock()
-
-	rooms := c.joinedRooms()
-	if len(rooms) > 0 && c.hub != nil {
-		c.hub.touchPresence(c.ID, rooms)
-	}
-}
-
 // dispatch routes an incoming message to handlers, direct recipients, or rooms.
 func (c *Conn) dispatch(msg *Message) {
 	select {
@@ -180,6 +193,9 @@ func (c *Conn) dispatch(msg *Message) {
 
 	switch msg.Event {
 	case "join":
+		if !c.allowControlEvent() {
+			return
+		}
 		if c.config.RoomAuthorize != nil && !c.config.RoomAuthorize(c, msg.Room) {
 			if c.config.Logger != nil {
 				c.config.Logger.Warn("Unauthorized room join attempt", "conn_id", c.ID, "room", msg.Room)
@@ -196,6 +212,9 @@ func (c *Conn) dispatch(msg *Message) {
 		c.TrySend(ack)
 
 	case "leave":
+		if !c.allowControlEvent() {
+			return
+		}
 		c.hub.leaveRoom(msg.Room, c)
 		ack := NewMessage(msg.Room, "leave_ack", "", c.ID, []byte(c.ID)).Bytes()
 		c.TrySend(ack)
@@ -242,7 +261,7 @@ func (c *Conn) cleanup() {
 	})
 }
 
-// readPump reads messages from the WebSocket and dispatches them.
+// readPump reads messages from the WebSocket and dispatches them with early size enforcement.
 func (c *Conn) readPump() {
 	if c.socket == nil {
 		return
@@ -253,7 +272,6 @@ func (c *Conn) readPump() {
 	_ = c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
 	c.socket.SetPongHandler(func(string) error {
 		_ = c.socket.SetReadDeadline(time.Now().Add(c.config.PongWait))
-		c.touchPresence()
 		return nil
 	})
 
@@ -262,10 +280,16 @@ func (c *Conn) readPump() {
 		if err != nil {
 			return
 		}
+		if int64(len(data)) > c.config.MaxMessageSize {
+			if c.config.Logger != nil {
+				c.config.Logger.Warn("Message exceeded MaxMessageSize", "conn_id", c.ID, "size", len(data), "max", c.config.MaxMessageSize)
+			}
+			return
+		}
 		if c.config.Metrics != nil {
 			c.config.Metrics.OnMessageReceived(len(data))
 		}
-		msg := BytesToMessage(data)
+		msg := BytesToMessageWithLimit(data, c.config.MaxMessageSize)
 		if msg == nil {
 			if c.config.Logger != nil {
 				c.config.Logger.Warn("Malformed binary packet received", "conn_id", c.ID)
@@ -330,15 +354,20 @@ func newConnection(w http.ResponseWriter, r *http.Request, claims map[string]str
 		_ = sock.Close()
 		return nil
 	}
+	burst := float64(cfg.ControlBurst)
+	if burst <= 0 {
+		burst = 20.0
+	}
 	return &Conn{
-		ID:        id.String(),
-		Claims:    claims,
-		hub:       h,
-		socket:    sock,
-		send:      make(chan []byte, cfg.ChannelCapacity),
-		done:      make(chan struct{}),
-		rooms:     make(map[string]struct{}),
-		config:    cfg,
-		lastTouch: time.Now(),
+		ID:            id.String(),
+		Claims:        claims,
+		hub:           h,
+		socket:        sock,
+		send:          make(chan []byte, cfg.ChannelCapacity),
+		done:          make(chan struct{}),
+		rooms:         make(map[string]struct{}),
+		config:        cfg,
+		controlTokens: burst,
+		controlLast:   time.Now(),
 	}
 }

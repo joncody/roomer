@@ -19,7 +19,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 8080;
-const REDIS_ADDR = process.env.REDIS_ADDR || "";
+const REDIS_ADDR = process.env.REDIS_ADDR || process.env.REDIS_URL || "";
 const REDIS_PREFIX = process.env.REDIS_PREFIX || "roomer:demo:";
 
 function find_file(candidates) {
@@ -37,7 +37,7 @@ const metrics = create_in_memory_metrics();
 let redis_pub = null;
 let redis_sub = null;
 
-// 1. Configure Redis Adapter if REDIS_ADDR is present
+// 1. Configure Redis Adapter if REDIS_ADDR or REDIS_URL is present (SET presence with auto-expiration)
 if (REDIS_ADDR !== "") {
     let redis_url = REDIS_ADDR;
     if (
@@ -55,7 +55,8 @@ if (REDIS_ADDR !== "") {
         await redis_pub.connect();
         await redis_sub.connect();
         const adapter = create_redis_adapter(redis_pub, redis_sub, {
-            prefix: REDIS_PREFIX
+            prefix: REDIS_PREFIX,
+            presence_ttl: 86400
         });
         await hub.configure(adapter, metrics);
         console.log("Connected to Redis cluster with node ID: " + adapter.node_id());
@@ -116,9 +117,11 @@ const server = http.createServer(function (req, res) {
     });
 });
 
-// 4. Mount WebSocket Server with 8,192 Channel Capacity
+// 4. Mount WebSocket Server with 8,192 Channel Capacity and token-bucket control rate limiting
 create_roomer_server(server, {
     channel_capacity: 8192,
+    control_burst: 20,
+    control_rate_limit: 10.0,
     hub,
     max_message_size: 16 * 1024 * 1024
 });

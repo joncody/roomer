@@ -33,8 +33,10 @@ pub struct ServerConfig {
     pub channel_capacity: usize,
     /// Buffer saturation policy.
     pub backpressure: BackpressureStrategy,
-    /// Minimum interval between cluster presence heartbeat score touches.
-    pub presence_touch_interval: Duration,
+    /// Token-bucket refill rate for join/leave events (tokens/sec).
+    pub control_rate_limit: f64,
+    /// Token-bucket max burst capacity for join/leave events.
+    pub control_burst: u32,
 }
 
 impl Default for ServerConfig {
@@ -45,7 +47,8 @@ impl Default for ServerConfig {
             pong_timeout: Duration::from_secs(60),
             channel_capacity: 8192,
             backpressure: BackpressureStrategy::default(),
-            presence_touch_interval: Duration::from_secs(54),
+            control_rate_limit: 10.0,
+            control_burst: 20,
         }
     }
 }
@@ -92,10 +95,11 @@ impl ServerConfig {
         self
     }
 
-    /// Sets minimum interval between presence heartbeat score touches.
+    /// Sets token-bucket control rate limit and burst for join/leave events.
     #[must_use]
-    pub fn with_presence_touch_interval(mut self, interval: Duration) -> Self {
-        self.presence_touch_interval = interval;
+    pub fn with_control_rate_limit(mut self, rate: f64, burst: u32) -> Self {
+        self.control_rate_limit = rate;
+        self.control_burst = burst;
         self
     }
 }
@@ -177,12 +181,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
     let (send_tx, mut send_rx) = mpsc::channel::<OutboundMessage>(state.config.channel_capacity);
 
     let conn_id = Uuid::new_v4().to_string();
-    let conn = Conn::with_backpressure(
+    let conn = Conn::with_rate_limit(
         conn_id,
         claims,
         send_tx,
         state.hub.metrics(),
         state.config.backpressure,
+        state.config.control_rate_limit,
+        state.config.control_burst as f64,
     );
 
     state.hub.add_conn(conn.clone());
@@ -273,11 +279,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
         }
     });
 
-    // Zero-copy reader loop
+    // Zero-copy reader loop with early size enforcement
     let hub = state.hub.clone();
     let conn_for_reader = conn.clone();
     let last_activity_reader = last_activity_ms.clone();
     let room_auth_checker = state.room_auth.clone();
+    let max_message_size = state.config.max_message_size;
 
     let mut reader_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -288,8 +295,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                         .as_millis() as u64;
                     last_activity_reader.store(elapsed, Ordering::Relaxed);
 
+                    // Enforce MaxMessageSize validation before reading / dispatching frame
+                    if bin.len() > max_message_size {
+                        warn!(conn_id = %conn_for_reader.id, "Frame exceeded max message size limit");
+                        break;
+                    }
+
                     conn_for_reader.metrics.on_message_received(bin.len());
-                    if let Some(packet) = Message::decode(bin) {
+                    if let Ok(packet) = Message::decode_strict_with_limit(bin, max_message_size) {
                         if packet.event == "join" {
                             if let Some(ref auth) = room_auth_checker {
                                 if !auth(&conn_for_reader, &packet.room) {
@@ -306,7 +319,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                         .duration_since(start_instant)
                         .as_millis() as u64;
                     last_activity_reader.store(elapsed, Ordering::Relaxed);
-                    conn_for_reader.touch_presence(&hub, state.config.presence_touch_interval);
                 }
                 _ => {}
             }

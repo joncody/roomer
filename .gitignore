@@ -46,6 +46,11 @@ server/rust/target/
 # ==============================================================================
 # Go (server/go)
 # ==============================================================================
+# Build outputs & binary directories
+bin/
+server/go/bin/
+server_bin
+
 # Compiled test and coverage binaries
 *.test
 *.out
@@ -112,10 +117,21 @@ htmlcov/
 # ==============================================================================
 # Formal Verification (spec/ - TLA+)
 # ==============================================================================
+# TLA+ tools binary
+tla2tools.jar
+spec/tla2tools.jar
+
+# Model checker caches & states
 spec/*.tlacache
 spec/states/
 *.tlacache
 states/
+
+# TLC / Toolbox execution artifacts
+*.toolbox/
+spec/*.toolbox/
+MC.*
+spec/MC.*
 
 # ==============================================================================
 # Environment Variables & Local Configs

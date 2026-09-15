@@ -21,7 +21,6 @@ where
 
         match frame {
             TungsteniteMsg::Binary(bin) => {
-                // `bin` is already `Bytes` in tokio-tungstenite 0.26+
                 return Message::decode(bin).expect("valid binary message frame");
             }
             TungsteniteMsg::Ping(_) | TungsteniteMsg::Pong(_) => {
@@ -52,6 +51,8 @@ async fn test_full_websocket_lifecycle_over_tcp() {
     // 1. Client 1 connects and receives "root" join_ack
     let (mut client1, _) = connect_async(&ws_url).await.expect("Client 1 connects");
     let c1_root_ack = recv_msg(&mut client1).await;
+    assert_eq!(c1_root_ack.version, 1);
+    assert_eq!(c1_root_ack.flags, 0);
     assert_eq!(c1_root_ack.room, "root");
     assert_eq!(c1_root_ack.event, "join_ack");
     let c1_id = c1_root_ack.src;
@@ -60,6 +61,7 @@ async fn test_full_websocket_lifecycle_over_tcp() {
     // 2. Client 2 connects and receives "root" join_ack
     let (mut client2, _) = connect_async(&ws_url).await.expect("Client 2 connects");
     let c2_root_ack = recv_msg(&mut client2).await;
+    assert_eq!(c2_root_ack.version, 1);
     assert_eq!(c2_root_ack.room, "root");
     assert_eq!(c2_root_ack.event, "join_ack");
     let c2_id = c2_root_ack.src;
@@ -71,7 +73,7 @@ async fn test_full_websocket_lifecycle_over_tcp() {
     assert_eq!(c1_root_new_member.event, "new_member");
     assert_eq!(c1_root_new_member.payload_str().unwrap(), c2_id);
 
-    // 4. Client 1 joins "game" room (pass `Bytes` directly with zero-copy)
+    // 4. Client 1 joins "game" room (12-byte wire format)
     let join_game = Message::new("game", "join", "", "", Bytes::new());
     client1
         .send(TungsteniteMsg::Binary(join_game.encode()))

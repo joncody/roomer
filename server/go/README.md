@@ -4,7 +4,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
-Go implementation of the Roomer WebSocket framework with 32-shard FNV-1a lock-striped concurrency, 64-byte L1/L2 cache line false sharing elimination, pluggable Redis cluster presence and unicast routing, configurable backpressure, and zero-allocation binary framing.
+Go implementation of the Roomer WebSocket framework with 32-shard FNV-1a lock-striped concurrency, 64-byte L1/L2 cache line false sharing elimination, pluggable Redis cluster SET presence with key expiration, token-bucket control-plane rate limiting, configurable backpressure, and zero-allocation 12-byte binary framing.
 
 > 📖 **For Wire Protocol specifications and Client API documentation, see the [Root README](../../README.md).**
 
@@ -30,7 +30,7 @@ The `server/go` package provides the backend coordinator (`Hub`), connection han
                                    |                   |
                +-------------------v-------------------v-----------+
                |          Pluggable Distributed Adapter            |
-               |  - Presence Sets (ZSET Heartbeat Touch on Pong)   |
+               |  - Auto-Expiring SET Presence (SADD, SREM)        |
                |  - True Wire-Level Unicast (SUBSCRIBE prefix:node)|
                |  - Loopback-Suppressed Broadcast (PUBLISH)        |
                +---------------------------------------------------+
@@ -38,10 +38,11 @@ The `server/go` package provides the backend coordinator (`Hub`), connection han
 
 - **32-Shard Lock Striping**: Both active connections and rooms are partitioned across 32 shards using FNV-1a hashing to eliminate CPU core mutex contention.
 - **False Sharing Elimination**: Shards are padded with explicit 32-byte arrays to expand each 32-byte struct to exactly 64 bytes, aligning with L1/L2 CPU cache lines.
+- **Token-Bucket Control-Plane Protection**: Enforces rate limiting on `join` and `leave` requests per connection to protect the Redis cluster from control-plane storms.
 - **Configurable Backpressure**: Choose between `DropSlowClient` (default memory protection), `DropOldest` (circular queue eviction), and `DropNewest`.
 - **True Wire-Level Unicast**: Direct node messages route via dedicated `SUBSCRIBE prefix:node:<nodeID>` channels, preventing bystander cluster nodes from receiving direct traffic over the wire.
-- **Presence Heartbeat Touching**: WebSocket Pong frames refresh connection timestamps in Redis ZSET presence sets via batched pipelines every 54 seconds.
-- **Zero-Allocation Binary Encoding**: Packets serialize directly into exact `make([]byte, totalLen)` pre-sized buffers with `binary.BigEndian` operations.
+- **Auto-Expiring SET Presence**: Redis SET presence sets (`SADD`, `SREM`, `SMEMBERS`) with key expiration on `AddPresence` auto-evict dead rooms on node crashes without heartbeat touching.
+- **12-Byte Binary Wire Framing**: Packets serialize directly into exact `make([]byte, totalLen)` pre-sized buffers with a 2-byte header and big-endian lengths.
 - **Zero Redis Memory Leaks**: Pure Pub/Sub routing keeps Redis completely stateless—no persistent stream radix trees, unread entry accumulation, or dead consumer groups.
 
 ---
@@ -88,7 +89,7 @@ func main() {
 		roomer.WithMaxMessageSize(8 * 1024 * 1024),
 		roomer.WithChannelCapacity(2048),
 		roomer.WithBackpressureStrategy(roomer.DropSlowClient),
-		roomer.WithPresenceTouchInterval(54 * time.Second),
+		roomer.WithControlRateLimit(10.0, 20),
 	))
 
 	server := &http.Server{Addr: ":8080"}
@@ -113,7 +114,7 @@ func main() {
 
 ## 🌐 Distributed Clustering (Redis Adapter)
 
-The Redis clustering adapter provides **loopback suppression**, **cluster presence synchronization with heartbeat touches**, and **wire-level isolated unicast routing**:
+The Redis clustering adapter provides **loopback suppression**, **auto-expiring SET presence**, and **wire-level isolated unicast routing**:
 
 ```go
 package main
@@ -132,7 +133,7 @@ func main() {
 	
 	adapter, err := redisadapter.New(rdb,
 		redisadapter.WithPrefix("roomer:demo:"),
-		redisadapter.WithPresenceTTL(180 * time.Second), // Prune inactive presence entries after 3 mins
+		redisadapter.WithPresenceTTL(180 * time.Second), // Key TTL on AddPresence
 	)
 	if err != nil {
 		panic(err)
@@ -158,7 +159,7 @@ func main() {
 | `WithMetrics(metrics)` | `NopMetrics{}` | Telemetry observer for connection counts, message rates, and dropped frames. |
 | `WithAdapter(adapter)` | `localAdapter` | Distributed clustering provider (e.g. `redisadapter`). |
 | `WithBackpressureStrategy(strategy)`| `DropSlowClient` | Buffer saturation strategy: `DropSlowClient`, `DropOldest`, or `DropNewest`. |
-| `WithPresenceTouchInterval(duration)` | `54s` | Minimum interval between presence heartbeat score updates on Pong frames. |
+| `WithControlRateLimit(rate, burst)` | `10.0, 20` | Token-bucket refill rate (tokens/s) and max burst for join/leave control events. |
 | `WithAuthorize(authFn)` | `nil` | Authenticator extracting claims map during handshake. |
 | `WithMaxMessageSize(bytes)` | `16 MB` | Maximum allowed WebSocket frame size in bytes. |
 | `WithChannelCapacity(capacity)` | `2048` | Outbound message queue capacity per connection. |

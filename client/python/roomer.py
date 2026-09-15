@@ -1,7 +1,7 @@
 """
 Roomer Python Client SDK.
 
-High-performance, room-based WebSocket client with zero-copy binary framing,
+High-performance, room-based WebSocket client with 12-byte zero-copy binary framing,
 exponential reconnection with jitter, presence synchronization, and full parity
 with Go, Rust, and Node.js servers.
 
@@ -22,7 +22,9 @@ from typing import Any
 
 import websockets
 
-HEADER_OVERHEAD: int = 20
+PROTOCOL_VERSION: int = 1
+DEFAULT_FLAGS: int = 0
+HEADER_OVERHEAD: int = 12
 
 RESERVED_EVENTS: frozenset[str] = frozenset({
     "close",
@@ -50,6 +52,8 @@ class Packet:
     dst: str
     src: str
     payload: bytes
+    version: int = PROTOCOL_VERSION
+    flags: int = DEFAULT_FLAGS
 
     def payload_text(self, encoding: str = "utf-8") -> str:
         """Decodes the binary payload as a text string."""
@@ -67,16 +71,33 @@ def encode_message(
     event: str = "",
     dst: str = "",
     src: str = "",
-    payload: bytes | bytearray | memoryview | str | dict | list | int | float | bool | None = None
+    payload: bytes | bytearray | memoryview | str | dict | list | int | float | bool | None = None,
+    version: int = PROTOCOL_VERSION,
+    flags: int = DEFAULT_FLAGS
 ) -> bytes:
     """
     Serializes message parameters into a contiguous big-endian length-prefixed binary packet.
-    Format: [4B room_len][room][4B event_len][event][4B dst_len][dst][4B src_len][src][4B payload_len][payload]
+    Format: [1B ver][1B flags][2B room_len][room][2B event_len][event][1B dst_len][dst][1B src_len][src][4B payload_len][payload]
+    Uses a pre-allocated bytearray and struct.pack_into() for maximum CPU efficiency.
     """
     room_bytes = room.encode("utf-8") if isinstance(room, str) else b""
     event_bytes = event.encode("utf-8") if isinstance(event, str) else b""
     dst_bytes = dst.encode("utf-8") if isinstance(dst, str) else b""
     src_bytes = src.encode("utf-8") if isinstance(src, str) else b""
+
+    room_len = len(room_bytes)
+    event_len = len(event_bytes)
+    dst_len = len(dst_bytes)
+    src_len = len(src_bytes)
+
+    if room_len > 65535:
+        raise ValueError("Room name exceeds maximum uint16 length (65535 bytes)")
+    if event_len > 65535:
+        raise ValueError("Event name exceeds maximum uint16 length (65535 bytes)")
+    if dst_len > 255:
+        raise ValueError("Destination ID exceeds maximum uint8 length (255 bytes)")
+    if src_len > 255:
+        raise ValueError("Source ID exceeds maximum uint8 length (255 bytes)")
 
     if payload is None:
         payload_bytes = b""
@@ -93,20 +114,46 @@ def encode_message(
     else:
         payload_bytes = b""
 
-    fmt = f">I{len(room_bytes)}sI{len(event_bytes)}sI{len(dst_bytes)}sI{len(src_bytes)}sI{len(payload_bytes)}s"
-    return struct.pack(
-        fmt,
-        len(room_bytes),
-        room_bytes,
-        len(event_bytes),
-        event_bytes,
-        len(dst_bytes),
-        dst_bytes,
-        len(src_bytes),
-        src_bytes,
-        len(payload_bytes),
-        payload_bytes
-    )
+    payload_len = len(payload_bytes)
+    total_len = HEADER_OVERHEAD + room_len + event_len + dst_len + src_len + payload_len
+
+    buf = bytearray(total_len)
+
+    # 1. Version (1B), Flags (1B), Room Len (2B)
+    struct.pack_into(">BBH", buf, 0, version, flags, room_len)
+    offset = 4
+    if room_len > 0:
+        buf[offset : offset + room_len] = room_bytes
+        offset += room_len
+
+    # 2. Event Len (2B)
+    struct.pack_into(">H", buf, offset, event_len)
+    offset += 2
+    if event_len > 0:
+        buf[offset : offset + event_len] = event_bytes
+        offset += event_len
+
+    # 3. Dst Len (1B)
+    struct.pack_into(">B", buf, offset, dst_len)
+    offset += 1
+    if dst_len > 0:
+        buf[offset : offset + dst_len] = dst_bytes
+        offset += dst_len
+
+    # 4. Src Len (1B)
+    struct.pack_into(">B", buf, offset, src_len)
+    offset += 1
+    if src_len > 0:
+        buf[offset : offset + src_len] = src_bytes
+        offset += src_len
+
+    # 5. Payload Len (4B)
+    struct.pack_into(">I", buf, offset, payload_len)
+    offset += 4
+    if payload_len > 0:
+        buf[offset : offset + payload_len] = payload_bytes
+
+    return bytes(buf)
 
 
 def decode_message(data: bytes | bytearray | memoryview) -> Packet | None:
@@ -120,45 +167,45 @@ def decode_message(data: bytes | bytearray | memoryview) -> Packet | None:
     offset = 0
 
     try:
-        # 1. Room
-        (room_len,) = struct.unpack_from(">I", buf, offset)
+        # 1. Version (1B), Flags (1B), Room Len (2B)
+        (version, flags, room_len) = struct.unpack_from(">BBH", buf, offset)
         offset += 4
         if offset + room_len > len(buf):
             return None
         room = bytes(buf[offset : offset + room_len]).decode("utf-8")
         offset += room_len
 
-        # 2. Event
-        if offset + 4 > len(buf):
+        # 2. Event Len (2B)
+        if offset + 2 > len(buf):
             return None
-        (event_len,) = struct.unpack_from(">I", buf, offset)
-        offset += 4
+        (event_len,) = struct.unpack_from(">H", buf, offset)
+        offset += 2
         if offset + event_len > len(buf):
             return None
         event = bytes(buf[offset : offset + event_len]).decode("utf-8")
         offset += event_len
 
-        # 3. Dst
-        if offset + 4 > len(buf):
+        # 3. Dst Len (1B)
+        if offset + 1 > len(buf):
             return None
-        (dst_len,) = struct.unpack_from(">I", buf, offset)
-        offset += 4
+        (dst_len,) = struct.unpack_from(">B", buf, offset)
+        offset += 1
         if offset + dst_len > len(buf):
             return None
         dst = bytes(buf[offset : offset + dst_len]).decode("utf-8")
         offset += dst_len
 
-        # 4. Src
-        if offset + 4 > len(buf):
+        # 4. Src Len (1B)
+        if offset + 1 > len(buf):
             return None
-        (src_len,) = struct.unpack_from(">I", buf, offset)
-        offset += 4
+        (src_len,) = struct.unpack_from(">B", buf, offset)
+        offset += 1
         if offset + src_len > len(buf):
             return None
         src = bytes(buf[offset : offset + src_len]).decode("utf-8")
         offset += src_len
 
-        # 5. Payload
+        # 5. Payload Len (4B)
         if offset + 4 > len(buf):
             return None
         (payload_len,) = struct.unpack_from(">I", buf, offset)
@@ -167,7 +214,15 @@ def decode_message(data: bytes | bytearray | memoryview) -> Packet | None:
             return None
         payload = bytes(buf[offset : offset + payload_len])
 
-        return Packet(room=room, event=event, dst=dst, src=src, payload=payload)
+        return Packet(
+            room=room,
+            event=event,
+            dst=dst,
+            src=src,
+            payload=payload,
+            version=version,
+            flags=flags,
+        )
     except (struct.error, UnicodeDecodeError):
         return None
 
@@ -484,7 +539,7 @@ class RoomerClient:
         src: str,
         payload: Any
     ) -> None:
-        """Serializes and enqueues a binary frame for ordered transmission over WebSocket."""
+        """Serializes and enqueues a 12-byte header binary frame for transmission."""
         if self.is_connected():
             raw = encode_message(room, event, dst, src, payload)
             try:

@@ -16,7 +16,9 @@ import {
     create_in_memory_metrics,
     encode_envelope,
     decode_envelope,
-    BACKPRESSURE
+    BACKPRESSURE,
+    HEADER_OVERHEAD,
+    PROTOCOL_VERSION
 } from "../index.js";
 
 function create_mock_ws() {
@@ -35,7 +37,7 @@ function create_mock_ws() {
 }
 
 // -----------------------------------------------------------------------------
-// 1. Wire Framing, Serialization & Malformed Packet Fuzzing
+// 1. 12-Byte Wire Framing, Serialization & Malformed Packet Fuzzing
 // -----------------------------------------------------------------------------
 
 test("Message framing: Standard string payload roundtrip", function () {
@@ -44,6 +46,8 @@ test("Message framing: Standard string payload roundtrip", function () {
 
     const decoded = decode_message(raw);
     assert.ok(decoded !== null);
+    assert.equal(decoded.version, PROTOCOL_VERSION);
+    assert.equal(decoded.flags, 0);
     assert.equal(decoded.room, "lobby");
     assert.equal(decoded.event, "chat");
     assert.equal(decoded.dst, "client_dst");
@@ -58,6 +62,7 @@ test("Message framing: Raw Buffer & Uint8Array binary payloads", function () {
 
     const decoded = decode_message(raw);
     assert.ok(decoded !== null);
+    assert.equal(decoded.version, PROTOCOL_VERSION);
     assert.deepEqual(decoded.payload, bin_payload);
 });
 
@@ -75,9 +80,11 @@ test("Message framing: Empty strings and zero-byte payload", function () {
     const original = create_message("", "", "", "", "");
     const raw = original.encode();
 
-    assert.equal(raw.length, 20, "Empty packet must be exactly 20 header bytes");
+    assert.equal(raw.length, HEADER_OVERHEAD, "Empty packet must be exactly 12 header bytes");
     const decoded = decode_message(raw);
     assert.ok(decoded !== null);
+    assert.equal(decoded.version, PROTOCOL_VERSION);
+    assert.equal(decoded.flags, 0);
     assert.equal(decoded.room, "");
     assert.equal(decoded.event, "");
     assert.equal(decoded.dst, "");
@@ -86,24 +93,43 @@ test("Message framing: Empty strings and zero-byte payload", function () {
 });
 
 test("Message framing: Rejection of malformed / truncated inputs", function () {
-    assert.equal(decode_message(Buffer.from([0, 0, 0, 5])), null);
-    assert.equal(decode_message(Buffer.alloc(19)), null);
+    assert.equal(decode_message(Buffer.from([1, 0, 0, 5])), null);
+    assert.equal(decode_message(Buffer.alloc(11)), null);
 
-    const truncated_room = Buffer.alloc(25);
-    truncated_room.writeUInt32BE(50, 0);
+    const truncated_room = Buffer.alloc(15);
+    truncated_room.writeUInt8(1, 0);
+    truncated_room.writeUInt8(0, 1);
+    truncated_room.writeUInt16BE(50, 2); // claims 50 bytes for room, but buffer only has 15
     assert.equal(decode_message(truncated_room), null);
-
-    const truncated_payload = Buffer.alloc(20);
-    truncated_payload.writeUInt32BE(100, 16);
-    assert.equal(decode_message(truncated_payload), null);
 
     const valid = create_message("r", "e", "", "", "p").encode();
     const with_trailing = Buffer.concat([valid, Buffer.from([1, 2, 3])]);
     assert.equal(decode_message(with_trailing), null);
+
+    // Max message size guard enforcement
+    assert.equal(decode_message(valid, 5), null, "Should reject frame exceeding max_message_size");
+});
+
+test("Message framing: Length prefix overflow boundary checks", function () {
+    assert.throws(function () {
+        create_message("a".repeat(65536), "event", "", "", "p").encode();
+    }, /Room name exceeds uint16 maximum length/);
+
+    assert.throws(function () {
+        create_message("room", "a".repeat(65536), "", "", "p").encode();
+    }, /Event name exceeds uint16 maximum length/);
+
+    assert.throws(function () {
+        create_message("room", "event", "a".repeat(256), "", "p").encode();
+    }, /Destination ID exceeds uint8 maximum length/);
+
+    assert.throws(function () {
+        create_message("room", "event", "", "a".repeat(256), "p").encode();
+    }, /Source ID exceeds uint8 maximum length/);
 });
 
 // -----------------------------------------------------------------------------
-// 2. Hub Room Lifecycle & Garbage Collection
+// 2. Hub Room Lifecycle & Token-Bucket Rate Limiter
 // -----------------------------------------------------------------------------
 
 test("Hub: Atomic join, leave, presence tracking, and empty room cleanup", async function () {
@@ -132,6 +158,19 @@ test("Hub: Atomic join, leave, presence tracking, and empty room cleanup", async
 
     hub.leave_room("lobby", c2);
     assert.equal(hub.get_room("lobby"), undefined);
+});
+
+test("Hub: Token-bucket control-plane rate limiting for join/leave", function () {
+    const hub = create_hub();
+    const conn = create_conn("limited_user", create_mock_ws(), hub, {}, 2048, BACKPRESSURE.DROP_SLOW_CLIENT, 5.0, 3);
+
+    // 3 immediate events consume burst
+    assert.equal(conn.allow_control_event(), true);
+    assert.equal(conn.allow_control_event(), true);
+    assert.equal(conn.allow_control_event(), true);
+
+    // 4th event must be rate limited
+    assert.equal(conn.allow_control_event(), false);
 });
 
 test("Hub: Reserved event registration & duplicate handler guards", function () {
@@ -170,8 +209,6 @@ test("LocalAdapter: In-memory presence and node registry contract", async functi
     assert.ok(presence.includes("client_100"));
     assert.ok(presence.includes("client_200"));
 
-    await adapter.touch_presence("client_100", ["channel_a"]);
-
     await adapter.remove_presence("channel_a", "client_100");
     presence = await adapter.get_presence("channel_a");
     assert.equal(presence.length, 1);
@@ -201,6 +238,7 @@ test("Redis Adapter: Envelope encoding and loopback decoding", function () {
 
     const unpacked_msg = decode_message(decoded.raw_msg);
     assert.ok(unpacked_msg !== null);
+    assert.equal(unpacked_msg.version, PROTOCOL_VERSION);
     assert.equal(unpacked_msg.room, "lobby");
     assert.equal(unpacked_msg.payloadString(), "cluster message");
 });
@@ -240,7 +278,6 @@ test("Custom Adapter: User-provided mock adapter integrates seamlessly", async f
         register_node: async function () {},
         remove_presence: async function () {},
         subscribe: async function () {},
-        touch_presence: async function () {},
         unregister_node: async function () {}
     });
 
@@ -312,10 +349,10 @@ test("Concurrency: 50 concurrent connections joining, messaging, and leaving", a
 });
 
 // -----------------------------------------------------------------------------
-// 7. Live Redis Adapter Cluster Sync, Suppression & Presence Integration Test
+// 7. Live Redis Adapter Cluster Sync, Suppression & SET Presence Test
 // -----------------------------------------------------------------------------
 
-test("Live Redis: Two-node cluster synchronization, loopback suppression, and presence", async function (t) {
+test("Live Redis: Two-node cluster synchronization, loopback suppression, and SET presence", async function (t) {
     const redis_addr = process.env.REDIS_ADDR || "localhost:6379";
     let redis_url = redis_addr;
     if (
@@ -359,7 +396,7 @@ test("Live Redis: Two-node cluster synchronization, loopback suppression, and pr
         node_b_received += 1;
     });
 
-    // 1. Verify Cluster Presence Synchronization & Pipelined Touch
+    // 1. Verify Cluster SET Presence Synchronization and Key Expiration
     await node_a.add_presence("lobby", "client_on_A");
     await node_b.add_presence("lobby", "client_on_B");
 
@@ -368,10 +405,10 @@ test("Live Redis: Two-node cluster synchronization, loopback suppression, and pr
     assert.ok(presence.includes("client_on_A"));
     assert.ok(presence.includes("client_on_B"));
 
-    // Pipelined presence touch across rooms
-    await node_a.touch_presence("client_on_A", ["lobby", "room_touch"]);
-    const touched_presence = await node_a.get_presence("room_touch");
-    assert.deepEqual(touched_presence, ["client_on_A"]);
+    // Verify Redis key expiration TTL is active
+    const presence_key = prefix + "presence:lobby";
+    const key_ttl = await pub_a.ttl(presence_key);
+    assert.ok(key_ttl > 0 && key_ttl <= 180, "Presence key must have active expiration TTL");
 
     // 2. Verify Node Registry & Targeted Unicast Routing
     await node_b.register_node("client_on_B");

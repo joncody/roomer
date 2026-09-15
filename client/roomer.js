@@ -1,6 +1,6 @@
 /**
  * @fileoverview High-performance, room-based WebSocket client library with
- * zero-copy binary framing, event-driven subscription channels, and
+ * 12-byte binary framing, event-driven subscription channels, and
  * automatic exponential backoff reconnection.
  *
  * @license MIT
@@ -8,6 +8,19 @@
 
 import bytecursor from "./bytecursor.js";
 import emitter from "./emitter.js";
+
+/**
+ * Protocol version constant.
+ * @type {number}
+ */
+const PROTOCOL_VERSION = 1;
+
+/**
+ * Base header byte overhead:
+ * [1B Version][1B Flags][2B RoomLen][2B EventLen][1B DstLen][1B SrcLen][4B PayloadLen]
+ * @type {number}
+ */
+const HEADER_OVERHEAD = 12;
 
 /**
  * UTF-8 text decoder instance.
@@ -53,19 +66,21 @@ function is_array_buffer(value) {
 }
 
 /**
- * Serializes message parameters into a length-prefixed binary packet.
+ * Serializes message parameters into a 12-byte header length-prefixed binary packet.
  *
  * Wire Format:
- * [4B room_len][room][4B event_len][event]...
+ * [1B Version][1B Flags][2B RoomLen][Room][2B EventLen][Event]
+ * [1B DstLen][Dst][1B SrcLen][Src][4B PayloadLen][Payload]
  *
  * @param {string} room_name - Destination room channel name.
  * @param {string} event_name - Message event name.
  * @param {string} dst_id - Destination client ID (or empty string).
  * @param {string} src_id - Origin client ID.
  * @param {*} payload_data - Payload data (string, buffer, object).
+ * @param {number} [flags=0] - Header flags bitfield.
  * @returns {Uint8Array} Contiguous serialized binary packet data.
  */
-function new_message(room_name, event_name, dst_id, src_id, payload_data) {
+function new_message(room_name, event_name, dst_id, src_id, payload_data, flags) {
     let dst = dst_id;
     let event = event_name;
     let payload = payload_data;
@@ -92,6 +107,19 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
     const event_bytes = encoder.encode(event);
     const dst_bytes = encoder.encode(dst);
     const src_bytes = encoder.encode(src);
+
+    if (room_bytes.byteLength > 65535) {
+        throw new RangeError("Room name exceeds uint16 maximum length (65535 bytes)");
+    }
+    if (event_bytes.byteLength > 65535) {
+        throw new RangeError("Event name exceeds uint16 maximum length (65535 bytes)");
+    }
+    if (dst_bytes.byteLength > 255) {
+        throw new RangeError("Destination ID exceeds uint8 maximum length (255 bytes)");
+    }
+    if (src_bytes.byteLength > 255) {
+        throw new RangeError("Source ID exceeds uint8 maximum length (255 bytes)");
+    }
 
     let payload_bytes;
     let payload_len = 0;
@@ -123,22 +151,24 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
     }
 
     const total_bytes = (
+        HEADER_OVERHEAD +
         room_bytes.byteLength +
         event_bytes.byteLength +
         dst_bytes.byteLength +
         src_bytes.byteLength +
-        payload_len +
-        20
+        payload_len
     );
 
     const data = bytecursor(new ArrayBuffer(total_bytes));
-    data.writeUint32(room_bytes.byteLength);
+    data.writeUint8(PROTOCOL_VERSION);
+    data.writeUint8(typeof flags === "number" ? flags : 0);
+    data.writeUint16(room_bytes.byteLength);
     data.writeBytes(room_bytes);
-    data.writeUint32(event_bytes.byteLength);
+    data.writeUint16(event_bytes.byteLength);
     data.writeBytes(event_bytes);
-    data.writeUint32(dst_bytes.byteLength);
+    data.writeUint8(dst_bytes.byteLength);
     data.writeBytes(dst_bytes);
-    data.writeUint32(src_bytes.byteLength);
+    data.writeUint8(src_bytes.byteLength);
     data.writeBytes(src_bytes);
     data.writeUint32(payload_len);
 
@@ -154,9 +184,11 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data) {
  * @typedef {Object} Packet
  * @property {string} dst - Targeted destination client ID.
  * @property {string} event - Event descriptor name.
+ * @property {number} flags - Wire protocol flags.
  * @property {Uint8Array} payload - Raw binary payload data.
  * @property {string} room - Channel or room name.
  * @property {string} src - Source client ID of the sender.
+ * @property {number} version - Protocol version.
  */
 
 /**
@@ -335,19 +367,26 @@ function roomer(url, options) {
         socket.onmessage = function (e) {
             try {
                 const data = bytecursor(e.data);
-                const room_str = data.getString(data.getUint32());
-                const event_str = data.getString(data.getUint32());
-                const dst_str = data.getString(data.getUint32());
-                const src_str = data.getString(data.getUint32());
+                if (data.length < HEADER_OVERHEAD) {
+                    return;
+                }
+                const version = data.getUint8();
+                const flags = data.getUint8();
+                const room_str = data.getString(data.getUint16());
+                const event_str = data.getString(data.getUint16());
+                const dst_str = data.getString(data.getUint8());
+                const src_str = data.getString(data.getUint8());
                 const payload_bytes = data.getBytes(data.getUint32());
 
                 /** @type {Packet} */
                 const packet = {
                     dst: dst_str,
                     event: event_str,
+                    flags,
                     payload: payload_bytes,
                     room: room_str,
-                    src: src_str
+                    src: src_str,
+                    version
                 };
 
                 if (rooms[packet.room] !== undefined) {

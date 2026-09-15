@@ -80,7 +80,7 @@ func TestLiveRedis_TwoNodeClusterSyncAndSuppression(t *testing.T) {
 	// Give Redis a moment to register subscriptions
 	time.Sleep(100 * time.Millisecond)
 
-	// Node A broadcasts 500 messages
+	// Node A broadcasts 500 messages using 12-byte wire format
 	totalMessages := 500
 	ctx := context.Background()
 	for i := 0; i < totalMessages; i++ {
@@ -164,36 +164,59 @@ func TestLiveRedis_TrueWireLevelUnicast(t *testing.T) {
 	}
 }
 
-func TestLiveRedis_PresenceHeartbeatTouch(t *testing.T) {
+func TestLiveRedis_SetPresenceWithExpiration(t *testing.T) {
 	rdb := getRedisClient(t)
 	defer rdb.Close()
 
-	prefix := fmt.Sprintf("roomer:touchtest:%d:", time.Now().UnixNano())
-	adapter, err := redisadapter.New(rdb, redisadapter.WithPrefix(prefix))
+	prefix := fmt.Sprintf("roomer:settest:%d:", time.Now().UnixNano())
+	ttl := 180 * time.Second
+	adapter, err := redisadapter.New(rdb,
+		redisadapter.WithPrefix(prefix),
+		redisadapter.WithPresenceTTL(ttl),
+	)
 	if err != nil {
 		t.Fatalf("failed to create adapter: %v", err)
 	}
 	defer adapter.Close()
 
 	ctx := context.Background()
-	room := "heartbeat_room"
-	connID := "client_heartbeat_1"
+	room := "set_room"
+	connID := "client_set_1"
 
-	_ = adapter.AddPresence(ctx, room, connID)
-	pres1, _ := adapter.GetPresence(ctx, room)
-	if len(pres1) != 1 || pres1[0] != connID {
-		t.Fatalf("expected presence with %s, got %v", connID, pres1)
+	// 1. SADD presence and apply TTL expiration
+	if err := adapter.AddPresence(ctx, room, connID); err != nil {
+		t.Fatalf("AddPresence failed: %v", err)
 	}
 
-	// Touch presence across multiple rooms in a single pipeline
-	err = adapter.TouchPresence(ctx, connID, []string{room, "room_two"})
+	// 2. SMEMBERS presence check
+	pres, err := adapter.GetPresence(ctx, room)
 	if err != nil {
-		t.Fatalf("TouchPresence failed: %v", err)
+		t.Fatalf("GetPresence failed: %v", err)
+	}
+	if len(pres) != 1 || pres[0] != connID {
+		t.Fatalf("expected presence set to contain %s, got %v", connID, pres)
 	}
 
-	pres2, _ := adapter.GetPresence(ctx, "room_two")
-	if len(pres2) != 1 || pres2[0] != connID {
-		t.Errorf("expected room_two to record presence touch for %s, got %v", connID, pres2)
+	// 3. Verify Redis key expiration was applied
+	key := prefix + "presence:" + room
+	remainingTTL, err := rdb.TTL(ctx, key).Result()
+	if err != nil {
+		t.Fatalf("failed to query key TTL: %v", err)
+	}
+	if remainingTTL <= 0 || remainingTTL > ttl {
+		t.Errorf("expected positive TTL <= %v, got %v", ttl, remainingTTL)
+	}
+
+	// 4. SREM presence check
+	if err := adapter.RemovePresence(ctx, room, connID); err != nil {
+		t.Fatalf("RemovePresence failed: %v", err)
+	}
+	presAfter, err := adapter.GetPresence(ctx, room)
+	if err != nil {
+		t.Fatalf("GetPresence after removal failed: %v", err)
+	}
+	if len(presAfter) != 0 {
+		t.Errorf("expected presence set to be empty after removal, got %v", presAfter)
 	}
 }
 

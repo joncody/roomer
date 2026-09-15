@@ -1,5 +1,7 @@
 use bytes::Bytes;
-use roomer::{Conn, HandlerError, Hub, InMemoryMetrics, Message, OutboundMessage};
+use roomer::{
+    BackpressureStrategy, Conn, HandlerError, Hub, InMemoryMetrics, Message, OutboundMessage,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -30,7 +32,7 @@ async fn test_hub_concurrent_join_leave_and_direct_routing() {
     let presence = hub.get_cluster_presence("lobby").await;
     assert_eq!(presence.len(), 2);
 
-    // Direct message: user_1 -> user_2
+    // Direct message: user_1 -> user_2 using 12-byte wire format
     let dm = Message::new(
         "root",
         "dm",
@@ -47,6 +49,8 @@ async fn test_hub_concurrent_join_leave_and_direct_routing() {
     match received {
         OutboundMessage::Binary(bin) => {
             let parsed = Message::decode(bin).expect("valid frame");
+            assert_eq!(parsed.version, 1);
+            assert_eq!(parsed.flags, 0);
             assert_eq!(parsed.event, "dm");
             assert_eq!(parsed.payload, Bytes::from_static(b"secret"));
         }
@@ -64,6 +68,29 @@ async fn test_hub_concurrent_join_leave_and_direct_routing() {
         "empty room should be garbage collected"
     );
     assert_eq!(metrics.active_rooms(), 0);
+}
+
+#[tokio::test]
+async fn test_conn_control_plane_rate_limiter() {
+    let (tx, _rx) = mpsc::channel(100);
+    let metrics = Arc::new(InMemoryMetrics::new());
+    let conn = Conn::with_rate_limit(
+        "limited_conn".into(),
+        Default::default(),
+        tx,
+        metrics,
+        BackpressureStrategy::DropSlowClient,
+        5.0, // 5 tokens/sec
+        3.0, // burst of 3
+    );
+
+    // 3 immediate events consume burst
+    assert!(conn.allow_control_event());
+    assert!(conn.allow_control_event());
+    assert!(conn.allow_control_event());
+
+    // 4th immediate event must be rate limited
+    assert!(!conn.allow_control_event());
 }
 
 #[tokio::test]

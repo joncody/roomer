@@ -7,18 +7,22 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
+      interval: 3s
+      timeout: 2s
       retries: 5
 
   node1:
     build:
       context: ../..
       dockerfile: server/node/Dockerfile
+      args:
+        EXAMPLE: server
+        FEATURES: redis-adapter
     container_name: roomer-node-node1
     environment:
       - "PORT=8080"
       - "REDIS_ADDR=redis:6379"
+      - "REDIS_URL=redis://redis:6379"
       - "REDIS_PREFIX=roomer:demo:"
     ports:
       - "8080:8080"
@@ -31,10 +35,14 @@ services:
     build:
       context: ../..
       dockerfile: server/node/Dockerfile
+      args:
+        EXAMPLE: server
+        FEATURES: redis-adapter
     container_name: roomer-node-node2
     environment:
       - "PORT=8081"
       - "REDIS_ADDR=redis:6379"
+      - "REDIS_URL=redis://redis:6379"
       - "REDIS_PREFIX=roomer:demo:"
     ports:
       - "8081:8081"

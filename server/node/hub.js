@@ -1,5 +1,6 @@
 /**
- * @fileoverview Central hub coordinator supporting direct adapter injection.
+ * @fileoverview Central hub coordinator supporting direct adapter injection,
+ * token-bucket control-plane protection, and SET presence synchronization.
  */
 
 import { create_room } from "./room.js";
@@ -165,14 +166,6 @@ function create_hub(options) {
         });
     }
 
-    function touch_presence(conn_id, rooms_list) {
-        if (Array.isArray(rooms_list) === true && rooms_list.length > 0) {
-            if (typeof adapter.touch_presence === "function") {
-                adapter.touch_presence(conn_id, rooms_list).catch(function () {});
-            }
-        }
-    }
-
     async function get_cluster_presence(room_name) {
         const member_set = Object.create(null);
         const room = rooms[room_name];
@@ -207,6 +200,9 @@ function create_hub(options) {
     async function dispatch(conn, msg) {
         switch (msg.event) {
         case "join": {
+            if (typeof conn.allow_control_event === "function" && conn.allow_control_event() === false) {
+                return;
+            }
             if (typeof opts.authorize_room === "function") {
                 const allowed = opts.authorize_room(conn, msg.room);
                 if (allowed === false) {
@@ -227,6 +223,9 @@ function create_hub(options) {
         }
 
         case "leave": {
+            if (typeof conn.allow_control_event === "function" && conn.allow_control_event() === false) {
+                return;
+            }
             leave_room(msg.room, conn);
             const ack = create_message(msg.room, "leave_ack", "", conn.id, conn.id);
             conn.try_send(ack.encode());
@@ -297,8 +296,7 @@ function create_hub(options) {
         register_handler,
         remove_conn,
         send_direct_to_cluster,
-        shutdown,
-        touch_presence
+        shutdown
     });
 
     // Auto-subscribe if an adapter was passed directly
