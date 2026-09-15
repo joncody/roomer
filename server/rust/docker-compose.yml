@@ -16,7 +16,7 @@ services:
       context: ../..
       dockerfile: server/rust/Dockerfile
       args:
-        EXAMPLE: server_with_redis
+        EXAMPLE: server
         FEATURES: redis-adapter
     container_name: roomer-rust-node1
     environment:
@@ -35,7 +35,7 @@ services:
       context: ../..
       dockerfile: server/rust/Dockerfile
       args:
-        EXAMPLE: server_with_redis
+        EXAMPLE: server
         FEATURES: redis-adapter
     container_name: roomer-rust-node2
     environment:

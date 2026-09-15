@@ -74,7 +74,7 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 	defer h.cfgMu.Unlock()
 	if adapter != nil {
 		h.adapter = adapter
-		_ = h.adapter.Subscribe(func(channelSuffix string, msg *Message) {
+		if err := h.adapter.Subscribe(func(channelSuffix string, msg *Message) {
 			// Targeted node unicast direct messaging: "node:node_UUID"
 			if strings.HasPrefix(channelSuffix, "node:") {
 				if msg.Dst != "" {
@@ -98,7 +98,11 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 			if r, ok := h.getRoom(roomName); ok {
 				r.emitLocal(msg)
 			}
-		})
+		}); err != nil {
+			if h.logger != nil {
+				h.logger.Error("Failed to subscribe to cluster adapter", "err", err)
+			}
+		}
 	}
 	if metrics != nil {
 		h.metrics = metrics

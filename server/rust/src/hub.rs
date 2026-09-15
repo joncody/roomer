@@ -77,7 +77,7 @@ impl Hub {
 
         let rooms = Arc::clone(&self.rooms);
         let conns = Arc::clone(&self.conns);
-        let _ = adapter
+        if let Err(err) = adapter
             .subscribe(Arc::new(move |channel_suffix, _sender_node, raw_frame| {
                 // Targeted unicast direct messaging: "node:node_UUID" or "root"
                 if channel_suffix.starts_with("node:") || channel_suffix == "root" {
@@ -99,7 +99,10 @@ impl Hub {
                     room.emit_local(None, raw_frame);
                 }
             }))
-            .await;
+            .await
+        {
+            error!(error = %err, "Failed to subscribe to cluster adapter");
+        }
     }
 
     /// Returns a reference to the active metrics collector.

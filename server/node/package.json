@@ -1,36 +1,46 @@
 {
-    "name": "roomer-server",
-    "version": "1.1.2",
-    "description": "High-performance, room-based WebSocket server with binary framing and multi-node clustering for Node.js",
-    "main": "index.js",
-    "type": "module",
-    "files": [
-        "*.js",
-        "*.d.ts",
-        "README.md",
-        "LICENSE"
-    ],
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/joncody/roomer.git",
-        "directory": "server/node"
-    },
-    "scripts": {
-        "start": "node examples/main.js",
-        "test": "node --test tests/index.js"
-    },
-    "keywords": [
-        "websocket",
-        "realtime",
-        "rooms",
-        "binary",
-        "redis",
-        "clustering"
-    ],
-    "author": "Jon Cody",
-    "license": "MIT",
-    "dependencies": {
-        "ioredis": "^5.4.2",
-        "ws": "^8.18.0"
+  "name": "roomer-server",
+  "version": "1.1.3",
+  "description": "High-performance, room-based WebSocket server with binary framing and multi-node clustering for Node.js",
+  "main": "index.js",
+  "type": "module",
+  "files": [
+    "*.js",
+    "*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joncody/roomer.git",
+    "directory": "server/node"
+  },
+  "scripts": {
+    "start": "node examples/main.js",
+    "test": "node --test tests/index.js"
+  },
+  "keywords": [
+    "websocket",
+    "realtime",
+    "rooms",
+    "binary",
+    "redis",
+    "clustering"
+  ],
+  "author": "Jon Cody",
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "ioredis": "^5.4.2"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
     }
+  },
+  "devDependencies": {
+    "ioredis": "^5.4.2"
+  }
 }

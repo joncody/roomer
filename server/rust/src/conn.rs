@@ -5,9 +5,9 @@ use bytes::Bytes;
 use dashmap::DashSet;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 /// Backpressure policy when outbound connection queue is saturated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -44,6 +44,9 @@ pub struct Conn {
     pub metrics: DynMetrics,
     /// Buffer saturation policy.
     pub backpressure: BackpressureStrategy,
+    /// Asynchronous notification channel signaling immediate connection teardown.
+    pub abort_notify: Arc<Notify>,
+    is_aborted: AtomicBool,
     last_touch_ms: AtomicU64,
 }
 
@@ -86,12 +89,18 @@ impl Conn {
             rooms: DashSet::new(),
             metrics,
             backpressure,
+            abort_notify: Arc::new(Notify::new()),
+            is_aborted: AtomicBool::new(false),
             last_touch_ms: AtomicU64::new(now_ms),
         })
     }
 
     /// Non-blocking send of a binary payload according to configured backpressure.
     pub fn try_send(&self, data: Bytes) -> bool {
+        if self.is_aborted.load(Ordering::Relaxed) {
+            return false;
+        }
+
         let size = data.len();
         match self.send_tx.try_send(OutboundMessage::Binary(data)) {
             Ok(()) => {
@@ -102,15 +111,19 @@ impl Conn {
                 self.metrics.on_message_dropped();
                 match self.backpressure {
                     BackpressureStrategy::DropSlowClient => {
-                        let _ = self
-                            .send_tx
-                            .try_send(OutboundMessage::Close(1008, "Slow client dropped".into()));
+                        // Immediately signal connection teardown to prevent zombie connections
+                        if !self.is_aborted.swap(true, Ordering::SeqCst) {
+                            self.abort_notify.notify_one();
+                        }
                         false
                     }
                     BackpressureStrategy::DropOldest | BackpressureStrategy::DropNewest => false,
                 }
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.is_aborted.store(true, Ordering::Relaxed);
+                false
+            }
         }
     }
 

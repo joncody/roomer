@@ -43,7 +43,7 @@ impl Default for ServerConfig {
             max_message_size: 16 * 1024 * 1024,
             ping_interval: Duration::from_secs(54),
             pong_timeout: Duration::from_secs(60),
-            channel_capacity: 2048,
+            channel_capacity: 8192,
             backpressure: BackpressureStrategy::default(),
             presence_touch_interval: Duration::from_secs(54),
         }
@@ -202,8 +202,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
     let last_activity_writer = last_activity_ms.clone();
     let conn_id_writer = conn.id.clone();
 
-    // High-performance coalescing WebSocket writer loop with biased branch priority
-    let writer_task = tokio::spawn(async move {
+    // High-performance coalescing writer: drains up to 1,024 frames before flushing to socket
+    let mut writer_task = tokio::spawn(async move {
         let check_interval = Duration::from_secs(1).min(ping_interval);
         let mut ticker = tokio::time::interval(check_interval);
         let mut last_ping = tokio::time::Instant::now();
@@ -233,7 +233,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                         }
 
                         count += 1;
-                        if count >= 128 {
+                        if count >= 1024 {
                             break;
                         }
 
@@ -273,13 +273,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
         }
     });
 
-    // Axum 0.8.9 zero-copy reader loop
+    // Zero-copy reader loop
     let hub = state.hub.clone();
     let conn_for_reader = conn.clone();
     let last_activity_reader = last_activity_ms.clone();
     let room_auth_checker = state.room_auth.clone();
 
-    let reader_task = tokio::spawn(async move {
+    let mut reader_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 ws::Message::Binary(bin) => {
@@ -313,9 +313,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
         }
     });
 
+    let abort_notify = conn.abort_notify.clone();
+
+    // Mutual Task Cancellation: if either task completes or backpressure triggers, terminate immediately
     tokio::select! {
-        _ = writer_task => {},
-        _ = reader_task => {},
+        _ = &mut writer_task => {
+            reader_task.abort();
+        }
+        _ = &mut reader_task => {
+            writer_task.abort();
+        }
+        _ = abort_notify.notified() => {
+            writer_task.abort();
+            reader_task.abort();
+        }
     }
 
     state.hub.leave_all_rooms(&conn);

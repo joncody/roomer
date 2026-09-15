@@ -56,7 +56,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-roomer = { version = "1.1.2", features = ["redis-adapter"] }
+roomer = { version = "1.1.3", features = ["redis-adapter"] }
 tokio = { version = "1.43", features = ["full"] }
 axum = { version = "0.8.9", features = ["ws"] }
 bytes = "1.10"
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Configure server state, backpressure, and heartbeat intervals
     let state = AppState::new(hub.clone()).with_config(
         ServerConfig::default()
-            .with_channel_capacity(2048)
+            .with_channel_capacity(8192)
             .with_max_message_size(16 * 1024 * 1024)
             .with_backpressure(BackpressureStrategy::DropSlowClient)
             .with_presence_touch_interval(Duration::from_secs(54)),
@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Builder Method | Default | Description |
 |---|---|---|
 | `.with_backpressure(strategy)` | `DropSlowClient` | Buffer saturation strategy: `DropSlowClient`, `DropOldest`, or `DropNewest`. |
-| `.with_channel_capacity(cap)` | `2048` | Buffered outbound message queue capacity per connection. |
+| `.with_channel_capacity(cap)` | `8192` | Buffered outbound message queue capacity per connection. |
 | `.with_presence_touch_interval(d)` | `54s` | Minimum interval between presence heartbeat score updates on Pong frames. |
 | `.with_max_message_size(bytes)` | `16 MB` | Maximum allowed WebSocket frame size in bytes. |
 | `.with_ping_interval(duration)` | `54s` | Heartbeat ping frame transmission interval. |

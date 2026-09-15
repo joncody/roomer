@@ -5,8 +5,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::info;
+use tracing::{debug, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[cfg(feature = "redis-adapter")]
+use roomer::{InMemoryMetrics, RedisAdapter};
 
 fn find_existing_path(candidates: &[&str]) -> PathBuf {
     for candidate in candidates {
@@ -29,15 +32,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let hub = Hub::new();
+    let mut clustered = false;
 
-    // Register "chat" handler
+    // 1. Connect Redis Adapter if redis-adapter feature is enabled and REDIS_URL or REDIS_ADDR is present
+    #[cfg(feature = "redis-adapter")]
+    if let Ok(redis_url) = std::env::var("REDIS_URL").or_else(|_| std::env::var("REDIS_ADDR")) {
+        let mut formatted_url = redis_url.clone();
+        if !formatted_url.starts_with("redis://") && !formatted_url.starts_with("rediss://") {
+            formatted_url = format!("redis://{}", formatted_url);
+        }
+        let prefix = std::env::var("REDIS_PREFIX").unwrap_or_else(|_| "roomer:demo:".into());
+        let metrics = Arc::new(InMemoryMetrics::new());
+
+        info!("Connecting to Redis cluster at {}", formatted_url);
+        match RedisAdapter::builder(&formatted_url).prefix(&prefix).build() {
+            Ok(adapter) => {
+                hub.configure(Arc::new(adapter), metrics).await;
+                info!("Configured Redis cluster adapter");
+                clustered = true;
+            }
+            Err(err) => {
+                warn!(error = %err, "Could not connect to Redis; running in standalone mode");
+            }
+        }
+    }
+
+    if !clustered {
+        info!("Running in standalone single-node mode");
+    }
+
+    // 2. Register "chat" broadcast handler (debug! prevents stdout lock contention during high-throughput bursts)
     let hub_chat = hub.clone();
     hub.register_handler(
         "chat",
         Arc::new(move |conn, msg| {
             let hub = hub_chat.clone();
             Box::pin(async move {
-                info!(
+                debug!(
                     room = %msg.room,
                     sender = %msg.src,
                     bytes = msg.payload.len(),
@@ -49,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     )?;
 
-    // Register "ping" handler
+    // 3. Register "ping" handler
     hub.register_handler(
         "ping",
         Arc::new(|conn, _msg| {
@@ -63,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState::new(hub.clone()).with_config(
         ServerConfig::default()
-            .with_channel_capacity(2048)
+            .with_channel_capacity(8192)
             .with_max_message_size(16 * 1024 * 1024),
     );
 
@@ -96,17 +127,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    info!(
-        "Roomer standalone server listening on http://localhost:{}",
-        port
-    );
-    info!("Interactive Demo: http://localhost:{}/", port);
-    info!("Browser Test Suite: http://localhost:{}/tests/", port);
+    info!("Roomer server listening on http://localhost:{}", port);
+    info!("Interactive Demo:    http://localhost:{}/", port);
+    info!("Browser Test Suite:  http://localhost:{}/tests/", port);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             tokio::signal::ctrl_c().await.ok();
-            info!("Shutting down server gracefully...");
+            info!("Shutting down server gracefully (broadcasting 1001 close frames)...");
             let _ = hub.shutdown().await;
         })
         .await?;

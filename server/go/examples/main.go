@@ -63,7 +63,7 @@ func main() {
 
 	// 1. Structured Logger
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 
@@ -87,6 +87,8 @@ func main() {
 	var adapter roomer.Adapter
 	if err := rdb.Ping(pingCtx).Err(); err != nil {
 		logger.Warn("Could not connect to Redis; running in standalone single-node mode", "err", err)
+		_ = rdb.Close()
+		rdb = nil
 	} else {
 		var err error
 		adapter, err = redisadapter.New(rdb,
@@ -100,9 +102,9 @@ func main() {
 		logger.Info("Connected to Redis cluster", "node_id", adapter.(*redisadapter.Adapter).NodeID())
 	}
 
-	// 3. Register custom event handler
+	// 3. Register custom event handler (Debug log prevents stdout contention during unthrottled bursts)
 	err := roomer.RegisterHandler("chat", func(c *roomer.Conn, msg *roomer.Message) error {
-		logger.Info("Chat message received",
+		logger.Debug("Chat message received",
 			"room", msg.Room,
 			"sender", msg.Src,
 			"bytes", len(msg.Payload),
@@ -125,10 +127,10 @@ func main() {
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 	http.Handle("/tests/", http.StripPrefix("/tests/", http.FileServer(http.Dir(testsDir))))
 
-	// 5. Mount WebSocket handler
+	// 5. Mount WebSocket handler with 8,192 Channel Capacity
 	opts := []roomer.Option{
 		roomer.WithLogger(logger),
-        roomer.WithChannelCapacity(8192),
+		roomer.WithChannelCapacity(8192),
 	}
 	if adapter != nil {
 		opts = append(opts, roomer.WithAdapter(adapter))

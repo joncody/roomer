@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -14,14 +15,41 @@ import (
 func main() {
 	node1URL := flag.String("node1", "ws://localhost:8080/ws", "WebSocket URL for Node 1")
 	node2URL := flag.String("node2", "ws://localhost:8081/ws", "WebSocket URL for Node 2")
+	nodesList := flag.String("nodes", "", "Comma-separated list of WebSocket node URLs (overrides -node1 and -node2)")
+	roomFlag := flag.String("room", "", "Room name (default: unique timestamped room per run)")
 	clientsPerNode := flag.Int("clients", 50, "Number of clients per node")
 	messagesToSend := flag.Int("messages", 1000, "Number of broadcast messages to send")
 	delayMicros := flag.Int("delay", 0, "Delay in microseconds between sent messages (0 = unthrottled burst)")
 	flag.Parse()
 
+	// 1. Resolve target nodes
+	var targetNodes []string
+	if *nodesList != "" {
+		for _, u := range strings.Split(*nodesList, ",") {
+			trimmed := strings.TrimSpace(u)
+			if trimmed != "" {
+				targetNodes = append(targetNodes, trimmed)
+			}
+		}
+	} else {
+		targetNodes = []string{*node1URL, *node2URL}
+	}
+
+	if len(targetNodes) < 2 {
+		log.Fatalf("Cluster test requires at least 2 nodes; got %d", len(targetNodes))
+	}
+
+	// 2. Isolate test runs to unique rooms to prevent ghost socket collisions
+	targetRoom := *roomFlag
+	if targetRoom == "" {
+		targetRoom = fmt.Sprintf("bench_room_%d", time.Now().UnixNano()%1000000)
+	}
+
 	log.Printf("Starting Cluster Load Test...")
-	log.Printf("Connecting %d clients to Node 1 (%s)", *clientsPerNode, *node1URL)
-	log.Printf("Connecting %d clients to Node 2 (%s)", *clientsPerNode, *node2URL)
+	log.Printf("  Target Room: %s", targetRoom)
+	for i, u := range targetNodes {
+		log.Printf("  Node %d: %s (%d clients)", i+1, u, *clientsPerNode)
+	}
 
 	var chatMessagesReceived int64
 
@@ -33,8 +61,8 @@ func main() {
 				log.Fatalf("Failed to connect client to %s: %v", url, err)
 			}
 
-			// Send binary join message to room "bench_room"
-			joinMsg := roomer.NewMessage("bench_room", "join", "", "", nil)
+			// Send binary join message to isolated room
+			joinMsg := roomer.NewMessage(targetRoom, "join", "", "", nil)
 			if err := c.WriteMessage(websocket.BinaryMessage, joinMsg.Bytes()); err != nil {
 				log.Fatalf("Failed to send join: %v", err)
 			}
@@ -58,21 +86,25 @@ func main() {
 		return conns
 	}
 
-	node1Clients := connectClients(*node1URL, *clientsPerNode)
-	node2Clients := connectClients(*node2URL, *clientsPerNode)
+	var allConns []*websocket.Conn
+	for _, u := range targetNodes {
+		conns := connectClients(u, *clientsPerNode)
+		allConns = append(allConns, conns...)
+	}
 
-	// Allow join handshakes to complete before starting measurement
+	// Allow join handshakes and cluster presence propagation to complete
 	time.Sleep(500 * time.Millisecond)
 
-	sender := node1Clients[0]
-	log.Printf("Broadcasting %d chat messages from Node 1 to room 'bench_room'...", *messagesToSend)
-
-	totalClients := (*clientsPerNode) * 2
+	sender := allConns[0]
+	totalClients := len(allConns)
 	expectedReceives := int64((totalClients - 1) * (*messagesToSend))
+
+	log.Printf("Broadcasting %d chat messages from Node 1 to room '%s'...", *messagesToSend, targetRoom)
+	log.Printf("Total connected clients: %d across %d cluster nodes", totalClients, len(targetNodes))
 
 	start := time.Now()
 	for i := 0; i < *messagesToSend; i++ {
-		msg := roomer.NewMessage("bench_room", "chat", "", "", []byte(fmt.Sprintf("loadtest_payload_%d", i)))
+		msg := roomer.NewMessage(targetRoom, "chat", "", "", []byte(fmt.Sprintf("loadtest_payload_%d", i)))
 		if err := sender.WriteMessage(websocket.BinaryMessage, msg.Bytes()); err != nil {
 			log.Fatalf("Sender write error: %v", err)
 		}
@@ -82,9 +114,10 @@ func main() {
 	}
 
 	log.Printf("Waiting for %d expected chat messages across cluster...", expectedReceives)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		received := atomic.LoadInt64(&chatMessagesReceived)
-		if received >= expectedReceives || time.Since(start) > 10*time.Second {
+		if received >= expectedReceives || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -93,14 +126,28 @@ func main() {
 	elapsed := time.Since(start)
 	finalReceived := atomic.LoadInt64(&chatMessagesReceived)
 
-	for _, c := range append(node1Clients, node2Clients...) {
-		c.Close()
+	// Graceful Leave: notify server to prune room membership before severing TCP sockets
+	for _, c := range allConns {
+		leaveMsg := roomer.NewMessage(targetRoom, "leave", "", "", nil)
+		_ = c.WriteMessage(websocket.BinaryMessage, leaveMsg.Bytes())
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	for _, c := range allConns {
+		_ = c.Close()
 	}
 
 	log.Printf("--------------------------------------------------")
 	log.Printf("CLUSTER LOAD TEST RESULTS:")
+	log.Printf("Total Nodes:          %d", len(targetNodes))
+	log.Printf("Total Clients:        %d", totalClients)
 	log.Printf("Total Elapsed Time:   %v", elapsed)
 	log.Printf("Total Receives:       %d / %d (%.2f%%)", finalReceived, expectedReceives, float64(finalReceived)/float64(expectedReceives)*100)
 	log.Printf("Throughput:           %.2f messages delivered/sec", float64(finalReceived)/elapsed.Seconds())
+
+	if finalReceived < expectedReceives {
+		missing := expectedReceives - finalReceived
+		log.Printf("NOTICE: %d messages dropped (clients were evicted by DropSlowClient backpressure)", missing)
+	}
 	log.Printf("--------------------------------------------------")
 }

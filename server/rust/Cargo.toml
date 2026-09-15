@@ -1,6 +1,6 @@
 [package]
 name = "roomer"
-version = "1.1.2"
+version = "1.1.3"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Jon Cody"]
@@ -43,13 +43,6 @@ redis-adapter = ["dep:redis"]
 [[bench]]
 name = "benchmarks"
 harness = false
-
-# We keep this explicit declaration because it requires a specific feature flag.
-# Cargo will automatically discover `examples/server.rs` without needing a block.
-[[example]]
-name = "server_with_redis"
-path = "examples/server_with_redis.rs"
-required-features = ["redis-adapter"]
 
 [profile.release]
 opt-level = 3
