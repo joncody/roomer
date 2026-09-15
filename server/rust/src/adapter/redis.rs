@@ -1,0 +1,459 @@
+//! Redis Pub/Sub clustering adapter with presence tracking, loopback suppression, and unicast routing.
+
+use super::{Adapter, AdapterError, SubscribeCallback};
+use crate::message::Message;
+use async_trait::async_trait;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use futures_util::StreamExt;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{RwLock, oneshot};
+use tracing::{error, info, warn};
+use uuid::Uuid;
+
+/// Builder for configuring and initializing a `RedisAdapter`.
+pub struct RedisAdapterBuilder {
+    redis_url: String,
+    prefix: String,
+    publish_timeout: Duration,
+    presence_ttl: Duration,
+    node_id: Option<String>,
+}
+
+impl RedisAdapterBuilder {
+    /// Creates a new builder with the given Redis URL.
+    pub fn new(redis_url: impl Into<String>) -> Self {
+        Self {
+            redis_url: redis_url.into(),
+            prefix: "roomer:demo:".into(),
+            publish_timeout: Duration::from_secs(5),
+            presence_ttl: Duration::from_secs(86400),
+            node_id: None,
+        }
+    }
+
+    /// Sets the key prefix for Redis pub/sub channels and presence keys.
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        let mut p = prefix.into();
+        if !p.ends_with(':') {
+            p.push(':');
+        }
+        self.prefix = p;
+        self
+    }
+
+    /// Sets timeout duration for PUBLISH commands.
+    pub fn publish_timeout(mut self, timeout: Duration) -> Self {
+        self.publish_timeout = timeout;
+        self
+    }
+
+    /// Sets the expiration threshold for inactive presence entries (default: 24h).
+    pub fn presence_ttl(mut self, ttl: Duration) -> Self {
+        self.presence_ttl = ttl;
+        self
+    }
+
+    /// Overrides the unique cluster node ID (defaults to UUID v4).
+    pub fn node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = Some(node_id.into());
+        self
+    }
+
+    /// Builds and returns the `RedisAdapter`.
+    ///
+    /// # Errors
+    /// Returns `AdapterError` if the Redis client cannot be opened.
+    pub fn build(self) -> Result<RedisAdapter, AdapterError> {
+        let mut url = self.redis_url;
+        if !url.starts_with("redis://") && !url.starts_with("rediss://") {
+            url = format!("redis://{}", url);
+        }
+
+        let client = ::redis::Client::open(url)
+            .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
+        let node_id = self.node_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        Ok(RedisAdapter {
+            client,
+            node_id,
+            prefix: self.prefix,
+            publish_timeout: self.publish_timeout,
+            presence_ttl: self.presence_ttl,
+            multiplexed_conn: Arc::new(RwLock::new(None)),
+            shutdown_tx: tokio::sync::Mutex::new(None),
+        })
+    }
+}
+
+/// Redis pub/sub cluster adapter with automatic presence sync, loopback suppression, and unicast routing.
+pub struct RedisAdapter {
+    client: ::redis::Client,
+    node_id: String,
+    prefix: String,
+    publish_timeout: Duration,
+    presence_ttl: Duration,
+    multiplexed_conn: Arc<RwLock<Option<::redis::aio::MultiplexedConnection>>>,
+    shutdown_tx: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl RedisAdapter {
+    /// Creates a new `RedisAdapter` with default configuration.
+    ///
+    /// # Errors
+    /// Returns `AdapterError` if connection parsing fails.
+    pub fn new(redis_url: &str, prefix: Option<&str>) -> Result<Self, AdapterError> {
+        let mut builder = RedisAdapterBuilder::new(redis_url);
+        if let Some(p) = prefix {
+            builder = builder.prefix(p);
+        }
+        builder.build()
+    }
+
+    /// Returns a builder instance for customizing settings.
+    pub fn builder(redis_url: &str) -> RedisAdapterBuilder {
+        RedisAdapterBuilder::new(redis_url)
+    }
+
+    async fn get_publish_conn(
+        &self,
+    ) -> Result<::redis::aio::MultiplexedConnection, AdapterError> {
+        {
+            let guard = self.multiplexed_conn.read().await;
+            if let Some(ref conn) = *guard {
+                return Ok(conn.clone());
+            }
+        }
+        let mut guard = self.multiplexed_conn.write().await;
+        if let Some(ref conn) = *guard {
+            Ok(conn.clone())
+        } else {
+            let conn = self
+                .client
+                .get_multiplexed_async_connection()
+                .await
+                .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
+            *guard = Some(conn.clone());
+            Ok(conn)
+        }
+    }
+
+    /// Encodes a message with a 4-byte length-prefixed node ID envelope.
+    pub fn encode_envelope(node_id: &str, raw_msg: &[u8]) -> Bytes {
+        let node_bytes = node_id.as_bytes();
+        let mut env = BytesMut::with_capacity(4 + node_bytes.len() + raw_msg.len());
+        env.put_u32(node_bytes.len() as u32);
+        env.put_slice(node_bytes);
+        env.put_slice(raw_msg);
+        env.freeze()
+    }
+
+    /// Decodes a node envelope, extracting sender node ID and raw message payload.
+    pub fn decode_envelope(mut data: Bytes) -> Option<(String, Bytes)> {
+        if data.len() < 4 {
+            return None;
+        }
+        let sender_node_len = data.get_u32() as usize;
+        if data.remaining() < sender_node_len {
+            return None;
+        }
+        let sender_bytes = data.split_to(sender_node_len);
+        let sender_node = String::from_utf8(sender_bytes.to_vec()).ok()?;
+        Some((sender_node, data))
+    }
+}
+
+#[async_trait]
+impl Adapter for RedisAdapter {
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    async fn publish(&self, room: &str, msg: &Message) -> Result<(), AdapterError> {
+        self.publish_raw(room, &msg.encode()).await
+    }
+
+    async fn publish_raw(&self, room: &str, raw_msg: &[u8]) -> Result<(), AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let channel = format!("{}room:{}", self.prefix, room);
+        let payload = Self::encode_envelope(&self.node_id, raw_msg);
+
+        let mut cmd = ::redis::cmd("PUBLISH");
+        cmd.arg(&channel).arg(payload.as_ref());
+
+        tokio::time::timeout(self.publish_timeout, cmd.query_async::<i64>(&mut conn))
+            .await
+            .map_err(|_| AdapterError::PublishTimeout)?
+            .map_err(|e| {
+                error!(error = %e, channel = %channel, "Redis PUBLISH command failed");
+                AdapterError::PublishFailed(e.to_string())
+            })?;
+
+        Ok(())
+    }
+
+    async fn publish_direct(
+        &self,
+        target_node_id: &str,
+        msg: &Message,
+    ) -> Result<(), AdapterError> {
+        self.publish_direct_raw(target_node_id, &msg.encode()).await
+    }
+
+    async fn publish_direct_raw(
+        &self,
+        target_node_id: &str,
+        raw_msg: &[u8],
+    ) -> Result<(), AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let channel = format!("{}node:{}", self.prefix, target_node_id);
+        let payload = Self::encode_envelope(&self.node_id, raw_msg);
+
+        let mut cmd = ::redis::cmd("PUBLISH");
+        cmd.arg(&channel).arg(payload.as_ref());
+
+        tokio::time::timeout(self.publish_timeout, cmd.query_async::<i64>(&mut conn))
+            .await
+            .map_err(|_| AdapterError::PublishTimeout)?
+            .map_err(|e| {
+                error!(error = %e, channel = %channel, "Redis unicast PUBLISH failed");
+                AdapterError::PublishFailed(e.to_string())
+            })?;
+
+        Ok(())
+    }
+
+    async fn add_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let key = format!("{}presence:{}", self.prefix, room);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _res: i64 = ::redis::cmd("ZADD")
+            .arg(&key)
+            .arg(now)
+            .arg(conn_id)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_presence(&self, room: &str, conn_id: &str) -> Result<(), AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let key = format!("{}presence:{}", self.prefix, room);
+        let _res: i64 = ::redis::cmd("ZREM")
+            .arg(&key)
+            .arg(conn_id)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_presence(&self, room: &str) -> Result<Vec<String>, AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let key = format!("{}presence:{}", self.prefix, room);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let min_score = now.saturating_sub(self.presence_ttl.as_secs());
+
+        let _prune: Result<i64, _> = ::redis::cmd("ZREMRANGEBYSCORE")
+            .arg(&key)
+            .arg("-inf")
+            .arg(min_score)
+            .query_async(&mut conn)
+            .await;
+
+        let members: Vec<String> = ::redis::cmd("ZRANGEBYSCORE")
+            .arg(&key)
+            .arg(min_score)
+            .arg("+inf")
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+        Ok(members)
+    }
+
+    async fn touch_presence(
+        &self,
+        conn_id: &str,
+        rooms: &[String],
+    ) -> Result<(), AdapterError> {
+        if rooms.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.get_publish_conn().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut pipe = ::redis::pipe();
+        for room in rooms {
+            let key = format!("{}presence:{}", self.prefix, room);
+            pipe.cmd("ZADD").arg(&key).arg(now).arg(conn_id).ignore();
+        }
+        let () = pipe
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn register_node(&self, conn_id: &str) -> Result<(), AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let key = format!("{}conn_node:{}", self.prefix, conn_id);
+        let _res: String = ::redis::cmd("SET")
+            .arg(&key)
+            .arg(&self.node_id)
+            .arg("EX")
+            .arg(86400)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn unregister_node(&self, conn_id: &str) -> Result<(), AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let key = format!("{}conn_node:{}", self.prefix, conn_id);
+        let _res: i64 = ::redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_node_for_conn(&self, conn_id: &str) -> Result<Option<String>, AdapterError> {
+        let mut conn = self.get_publish_conn().await?;
+        let key = format!("{}conn_node:{}", self.prefix, conn_id);
+        let node: Option<String> = ::redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AdapterError::PublishFailed(e.to_string()))?;
+        Ok(node)
+    }
+
+    async fn subscribe(&self, callback: SubscribeCallback) -> Result<(), AdapterError> {
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        *self.shutdown_tx.lock().await = Some(shutdown_tx);
+
+        let client = self.client.clone();
+        let prefix = self.prefix.clone();
+        let node_id = self.node_id.clone();
+        let room_pattern = format!("{}room:*", prefix);
+        let node_channel = format!("{}node:{}", prefix, node_id);
+
+        let mut pubsub_conn = client
+            .get_async_pubsub()
+            .await
+            .map_err(|e| AdapterError::ConnectionFailed(e.to_string()))?;
+
+        pubsub_conn
+            .psubscribe(&room_pattern)
+            .await
+            .map_err(|e| AdapterError::SubscribeFailed(e.to_string()))?;
+
+        pubsub_conn
+            .subscribe(&node_channel)
+            .await
+            .map_err(|e| AdapterError::SubscribeFailed(e.to_string()))?;
+
+        info!(
+            node_id = %node_id,
+            room_pattern = %room_pattern,
+            node_channel = %node_channel,
+            "Successfully subscribed to Redis room pattern and dedicated node unicast channel"
+        );
+
+        tokio::spawn(async move {
+            let mut stream = pubsub_conn.into_on_message();
+
+            'outer: loop {
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => return,
+                        redis_msg = stream.next() => {
+                            match redis_msg {
+                                Some(msg) => {
+                                    let payload_bytes = msg.get_payload_bytes();
+                                    let data = Bytes::copy_from_slice(payload_bytes);
+
+                                    if let Some((sender_node, raw_data)) = RedisAdapter::decode_envelope(data) {
+                                        // Loopback Suppression: Drop messages originating from our own node
+                                        if sender_node == node_id {
+                                            continue;
+                                        }
+
+                                        let channel_name = msg.get_channel_name();
+                                        let channel_suffix = channel_name.strip_prefix(&prefix).unwrap_or(channel_name);
+                                        let clean_suffix = channel_suffix.strip_prefix("room:").unwrap_or(channel_suffix);
+                                        callback(clean_suffix, &sender_node, raw_data);
+                                    }
+                                }
+                                None => {
+                                    warn!("Redis pub/sub stream terminated unexpectedly. Attempting reconnect...");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Reconnection loop with exponential backoff and jitter
+                let mut backoff = Duration::from_millis(200);
+                let max_backoff = Duration::from_secs(5);
+
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => return,
+                        _ = tokio::time::sleep(backoff) => {
+                            match client.get_async_pubsub().await {
+                                Ok(mut new_pubsub) => {
+                                    let psub_res = new_pubsub.psubscribe(&room_pattern).await;
+                                    let sub_res = new_pubsub.subscribe(&node_channel).await;
+
+                                    if psub_res.is_ok() && sub_res.is_ok() {
+                                        info!(
+                                            node_id = %node_id,
+                                            room_pattern = %room_pattern,
+                                            node_channel = %node_channel,
+                                            "Successfully reconnected and re-subscribed to Redis cluster"
+                                        );
+                                        stream = new_pubsub.into_on_message();
+                                        continue 'outer;
+                                    } else {
+                                        warn!("Failed to re-subscribe to Redis patterns, retrying...");
+                                    }
+                                }
+                                Err(err) => {
+                                    warn!(error = %err, "Failed to re-establish Redis pub/sub connection, retrying...");
+                                }
+                            }
+
+                            let jitter = Duration::from_millis(
+                                (tokio::time::Instant::now().elapsed().as_nanos() % 150) as u64
+                            );
+                            backoff = (backoff * 2).min(max_backoff) + jitter;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<(), AdapterError> {
+        if let Some(tx) = self.shutdown_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
+}

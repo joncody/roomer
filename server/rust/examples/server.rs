@@ -45,7 +45,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let metrics = Arc::new(InMemoryMetrics::new());
 
         info!("Connecting to Redis cluster at {}", formatted_url);
-        match RedisAdapter::builder(&formatted_url).prefix(&prefix).build() {
+        match RedisAdapter::builder(&formatted_url)
+            .prefix(&prefix)
+            .build()
+        {
             Ok(adapter) => {
                 hub.configure(Arc::new(adapter), metrics).await;
                 info!("Configured Redis cluster adapter");
