@@ -115,9 +115,7 @@ impl RedisAdapter {
         RedisAdapterBuilder::new(redis_url)
     }
 
-    async fn get_publish_conn(
-        &self,
-    ) -> Result<::redis::aio::MultiplexedConnection, AdapterError> {
+    async fn get_publish_conn(&self) -> Result<::redis::aio::MultiplexedConnection, AdapterError> {
         {
             let guard = self.multiplexed_conn.read().await;
             if let Some(ref conn) = *guard {
@@ -278,11 +276,7 @@ impl Adapter for RedisAdapter {
         Ok(members)
     }
 
-    async fn touch_presence(
-        &self,
-        conn_id: &str,
-        rooms: &[String],
-    ) -> Result<(), AdapterError> {
+    async fn touch_presence(&self, conn_id: &str, rooms: &[String]) -> Result<(), AdapterError> {
         if rooms.is_empty() {
             return Ok(());
         }
