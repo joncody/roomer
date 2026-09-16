@@ -45,10 +45,10 @@ impl Room {
         for entry in self.members.iter() {
             let id = entry.key();
             let member = entry.value();
-            if let Some(excluded) = exclude_id {
-                if id == excluded {
-                    continue;
-                }
+            if let Some(excluded) = exclude_id
+                && id == excluded
+            {
+                continue;
             }
             member.try_send(data.clone());
         }

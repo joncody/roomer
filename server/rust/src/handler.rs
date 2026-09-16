@@ -307,12 +307,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                     conn_for_reader.metrics.on_message_received(bin.len());
                     match Message::decode_strict_with_limit(bin, max_message_size) {
                         Ok(packet) => {
-                            if packet.event == "join" {
-                                if let Some(ref auth) = room_auth_checker {
-                                    if !auth(&conn_for_reader, &packet.room) {
-                                        continue;
-                                    }
-                                }
+                            if packet.event == "join"
+                                && let Some(ref auth) = room_auth_checker
+                                && !auth(&conn_for_reader, &packet.room)
+                            {
+                                continue;
                             }
                             hub.dispatch(conn_for_reader.clone(), packet).await;
                         }

@@ -80,15 +80,14 @@ impl Hub {
         if let Err(err) = adapter
             .subscribe(Arc::new(move |channel_suffix, _sender_node, raw_frame| {
                 // Targeted unicast direct messaging: "node:node_UUID" or "root"
-                if channel_suffix.starts_with("node:") || channel_suffix == "root" {
-                    if let Some(packet) = Message::decode(raw_frame.clone()) {
-                        if !packet.dst.is_empty() {
-                            if let Some(dst_conn) = conns.get(&packet.dst) {
-                                dst_conn.try_send(raw_frame);
-                            }
-                            return;
-                        }
+                if (channel_suffix.starts_with("node:") || channel_suffix == "root")
+                    && let Some(packet) = Message::decode(raw_frame.clone())
+                    && !packet.dst.is_empty()
+                {
+                    if let Some(dst_conn) = conns.get(&packet.dst) {
+                        dst_conn.try_send(raw_frame);
                     }
+                    return;
                 }
 
                 // Zero-copy local room fanout directly using raw wire Bytes
@@ -278,14 +277,13 @@ impl Hub {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let adapter = adapter_lock.read().await;
-                if let Ok(Some(target_node)) = adapter.get_node_for_conn(&dst_id_str).await {
-                    if adapter
+                if let Ok(Some(target_node)) = adapter.get_node_for_conn(&dst_id_str).await
+                    && adapter
                         .publish_direct_raw(&target_node, &encoded)
                         .await
                         .is_ok()
-                    {
-                        return;
-                    }
+                {
+                    return;
                 }
                 // Fallback to cluster broadcast on root channel
                 let _ = adapter.publish_raw("root", &encoded).await;

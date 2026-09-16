@@ -98,8 +98,8 @@ func TestMessage_MalformedInput(t *testing.T) {
 		1, 0, // version, flags
 		0, 4, 'a', 'b', 'c', 'd', // room (len 4)
 		0, 0, // event (len 0)
-		0,    // dst (len 0)
-		0,    // src (len 0)
+		0,           // dst (len 0)
+		0,           // src (len 0)
 		0, 0, 0, 50, // payload claims 50 bytes, but ends here
 	}
 	if msg := BytesToMessage(corrupted); msg != nil {
@@ -213,7 +213,7 @@ func TestConn_TokenBucketRateLimiter(t *testing.T) {
 		t.Errorf("expected token 3 to be allowed")
 	}
 
-	// 4th immediate event must be rejected
+	// 4th immediate event must be rate-limited
 	if c.allowControlEvent() {
 		t.Errorf("expected 4th event to be rate-limited")
 	}

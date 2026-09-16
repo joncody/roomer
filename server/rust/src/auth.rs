@@ -27,10 +27,10 @@ pub fn extract_query_param<'a>(uri: &'a Uri, key: &str) -> Option<&'a str> {
     let query = uri.query()?;
     for pair in query.split('&') {
         let mut parts = pair.splitn(2, '=');
-        if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-            if k == key {
-                return Some(v);
-            }
+        if let (Some(k), Some(v)) = (parts.next(), parts.next())
+            && k == key
+        {
+            return Some(v);
         }
     }
     None
