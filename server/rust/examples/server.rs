@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{debug, info};
 #[cfg(feature = "redis-adapter")]
 use tracing::warn;
+use tracing::{debug, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(feature = "redis-adapter")]
