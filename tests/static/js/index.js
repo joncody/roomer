@@ -130,13 +130,18 @@ function create_test_runner() {
  * [1B Version][1B Flags][2B RoomLen][Room][2B EventLen][Event]
  * [1B DstLen][Dst][1B SrcLen][Src][4B PayloadLen][Payload]
  */
-function encode_packet(room, event, dst, src, payload_str) {
+function encode_packet(room, event, dst, src, payload_str, flags) {
     const encoder = new TextEncoder();
     const room_bytes = encoder.encode(room);
     const event_bytes = encoder.encode(event);
     const dst_bytes = encoder.encode(dst);
     const src_bytes = encoder.encode(src);
     const payload_bytes = encoder.encode(payload_str);
+    const flag_bits = (
+        typeof flags === "number" && Number.isInteger(flags) === true && flags >= 0 && flags <= 255
+        ? flags
+        : 0
+    );
     const total_bytes = (
         12 +
         room_bytes.byteLength +
@@ -148,7 +153,7 @@ function encode_packet(room, event, dst, src, payload_str) {
 
     const data = bytecursor(new ArrayBuffer(total_bytes));
     data.writeUint8(1); // Protocol Version: 1
-    data.writeUint8(0); // Flags: 0
+    data.writeUint8(flag_bits); // Flags
     data.writeUint16(room_bytes.byteLength);
     data.writeBytes(room_bytes);
     data.writeUint16(event_bytes.byteLength);
@@ -221,9 +226,9 @@ function run_all_tests() {
     );
 
     // -------------------------------------------------------------------------
-    // GROUP 2: Member ID & Initial State
+    // GROUP 2: Member ID, Connection State, URL & Backpressure Accessors
     // -------------------------------------------------------------------------
-    runner.group("2. Member ID & Initial State");
+    runner.group("2. Member ID, Connection State, URL & Backpressure Accessors");
 
     runner.assert(
         root.open() === false,
@@ -236,6 +241,18 @@ function run_all_tests() {
     runner.assert(
         Array.isArray(root.members()) === true && root.members().length === 0,
         "Initial members() returns empty array copy"
+    );
+    runner.assert(
+        root.readyState() === "connecting" || root.readyState() === "open" || root.readyState() === "closed",
+        "readyState() returns valid string ('connecting', 'open', 'closing', or 'closed')"
+    );
+    runner.assert(
+        typeof root.bufferedAmount() === "number" && root.bufferedAmount() >= 0,
+        "bufferedAmount() returns non-negative number"
+    );
+    runner.assert(
+        typeof root.url() === "string" && root.url() === ws_url,
+        "url() returns configured WebSocket endpoint URL"
     );
 
     // -------------------------------------------------------------------------
@@ -253,7 +270,8 @@ function run_all_tests() {
         "join_ack",
         "",
         "user_123",
-        JSON.stringify(["user_123", "user_456"])
+        JSON.stringify(["user_123", "user_456"]),
+        0
     );
 
     const packet = parse_packet_data(join_ack_buffer);
@@ -295,7 +313,8 @@ function run_all_tests() {
         "new_member",
         "user_123",
         "user_789",
-        "user_789"
+        "user_789",
+        0
     );
     const packet2 = parse_packet_data(new_member_buffer);
 
@@ -320,7 +339,8 @@ function run_all_tests() {
         "member_left",
         "user_123",
         "user_789",
-        "user_789"
+        "user_789",
+        0
     );
     const packet3 = parse_packet_data(left_buffer);
 
@@ -350,7 +370,8 @@ function run_all_tests() {
         "chat_msg",
         "user_123",
         "user_456",
-        "Hello World!"
+        "Hello World!",
+        0
     );
     const packet4 = parse_packet_data(msg_buffer);
 
@@ -394,9 +415,9 @@ function run_all_tests() {
     );
 
     // -------------------------------------------------------------------------
-    // GROUP 7: Force Close, Root Close & Purge
+    // GROUP 7: Force Close, Root Close & Sub-Room Diagnostics
     // -------------------------------------------------------------------------
-    runner.group("7. Force Close, Root Close & Purge");
+    runner.group("7. Force Close, Root Close & Sub-Room Diagnostics");
 
     let close_fired = false;
     root.on("close", function () {
@@ -430,7 +451,8 @@ function run_all_tests() {
         "join_ack",
         "",
         "user_123",
-        "[]"
+        "[]",
+        0
     ));
     sub_room.parse(sub_ack_packet);
 
@@ -439,6 +461,22 @@ function run_all_tests() {
         sub_close_fired = true;
     });
 
+    runner.assert(
+        sub_room.open() === true,
+        "sub_room.open() returns true after join_ack"
+    );
+    runner.assert(
+        sub_room.readyState() === "connecting" || sub_room.readyState() === "open",
+        "sub_room.readyState() reports connection state"
+    );
+    runner.assert(
+        typeof sub_room.bufferedAmount() === "number" && sub_room.bufferedAmount() >= 0,
+        "sub_room.bufferedAmount() returns non-negative buffer bytes"
+    );
+    runner.assert(
+        sub_room.url() === ws_url,
+        "sub_room.url() returns endpoint URL"
+    );
     runner.assert(
         typeof fresh_client.close === "function",
         "root.close() is available on root room interface"
@@ -456,12 +494,20 @@ function run_all_tests() {
         "root.close() sets open() to false on root room"
     );
     runner.assert(
+        fresh_client.readyState() === "closed",
+        "root.close() sets readyState() to 'closed' on root room"
+    );
+    runner.assert(
         sub_close_fired === true,
         "root.close() cascades teardown and close event to sub-rooms"
     );
     runner.assert(
         sub_room.open() === false,
         "root.close() sets open() to false on sub-rooms"
+    );
+    runner.assert(
+        sub_room.readyState() === "closed",
+        "root.close() cascades readyState() 'closed' to sub-rooms"
     );
 
     runner.render_summary(start_time);

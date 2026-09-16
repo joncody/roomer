@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "roomer-client"
-version = "1.2.0"
+version = "1.2.1"
 description = "High-performance, room-based WebSocket client for Roomer with binary framing and presence synchronization"
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,7 @@ include = [
 [tool.hatch.build.targets.sdist]
 include = [
     "roomer.py",
+    "README.md",
 ]
 
 [tool.pytest.ini_options]

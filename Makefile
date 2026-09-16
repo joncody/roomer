@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-go test-rust test-node test-python check tla tla-download redis redis-up redis-down cluster cluster-up cluster-down loadtest cluster-test
+.PHONY: help test test-go test-rust test-node test-python check tla tla-download redis redis-up redis-down cluster cluster-up cluster-down loadtest cluster-test clean
 
 # Auto-detect local virtualenv pytest using absolute paths to avoid 'cd' concatenation bugs
 PYTEST ?= $(if $(wildcard client/python/.venv/bin/pytest),$(CURDIR)/client/python/.venv/bin/pytest,$(if $(wildcard client/python/.venv/bin/python),$(CURDIR)/client/python/.venv/bin/python -m pytest,pytest))
@@ -49,7 +49,7 @@ help: ## Display this help guide with available targets
 	@grep -E '^(cluster|cluster-[a-z]+|loadtest):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1;37mInfrastructure & Utilities\033[0m"
-	@grep -E '^(redis|redis-[a-z]+|tla-download|tla2tools.jar|help):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(redis|redis-[a-z]+|tla-download|tla2tools.jar|clean|help):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1;37mConfigurable Variables\033[0m"
 	@echo "    \033[33mPAIR\033[0m            Cluster server pair (default: go-rust; options: rust-go, go-node, rust-node)"
@@ -66,7 +66,7 @@ help: ## Display this help guide with available targets
 test: test-go test-rust test-node test-python ## Run all unit test suites across Go, Rust, Node, and Python
 
 test-go: ## Run Go unit tests with race detector
-	go test -race ./server/go/...
+	cd server/go && go test -v -race ./...
 
 test-rust: ## Run Rust server unit and integration tests
 	cargo test --manifest-path server/rust/Cargo.toml --features redis-adapter
@@ -122,7 +122,7 @@ cluster-down: ## Stop and tear down multi-node cluster containers
 	docker compose -f docker-compose.cluster.yml down
 
 loadtest: ## Run cluster load test (CLIENTS=50 MESSAGES=500 DELAY=0)
-	go run ./server/go/cmd/loadtest/main.go \
+	cd server/go && go run ./cmd/loadtest/main.go \
 		-node1=$(NODE1_URL) \
 		-node2=$(NODE2_URL) \
 		$(if $(NODES),-nodes=$(NODES),) \
@@ -137,3 +137,23 @@ cluster-test: cluster ## Orchestrate cluster spinup, readiness wait, load test, 
 	@sleep 5
 	@$(MAKE) loadtest || (echo "Loadtest failed, leaving cluster running for debugging." && exit 1)
 	@$(MAKE) cluster-down
+
+clean: ## Remove build artifacts, caches, and test artifacts across all languages
+	@echo "Cleaning Go artifacts and test caches..."
+	@(cd server/go && go clean -cache -testcache) 2>/dev/null || true
+	@(cd server/go && go clean -i -r) 2>/dev/null || true
+	@rm -f server_bin server/go/server_bin server/go/cmd/loadtest/loadtest
+	@echo "Cleaning Rust target directories..."
+	@cargo clean --manifest-path server/rust/Cargo.toml 2>/dev/null || true
+	@echo "Cleaning Python build and test caches..."
+	@rm -rf client/python/build client/python/dist client/python/*.egg-info client/python/.pytest_cache
+	@find client/python -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@echo "Cleaning TLA+ state files..."
+	@rm -rf states/ spec/states/ MC.out spec/MC.out
+	@echo "Cleaning Docker containers, volumes, and Redis test data..."
+	@docker compose -f docker-compose.cluster.yml down -v --remove-orphans 2>/dev/null || true
+	@docker compose -f server/go/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
+	@docker compose -f server/node/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
+	@docker compose -f server/rust/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
+	@redis-cli -p 6379 flushall 2>/dev/null || true
+	@echo "Clean completed."

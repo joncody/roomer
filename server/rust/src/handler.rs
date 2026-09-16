@@ -206,7 +206,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
     let last_activity_ms = Arc::new(AtomicU64::new(0));
 
     let last_activity_writer = last_activity_ms.clone();
-    let conn_id_writer = conn.id.clone();
+    let conn_for_writer = conn.clone();
 
     // High-performance coalescing writer: drains up to 1,024 frames before flushing to socket
     let mut writer_task = tokio::spawn(async move {
@@ -259,11 +259,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                     let elapsed_since_act = now.duration_since(start_instant + Duration::from_millis(last_act));
 
                     if elapsed_since_act > pong_timeout {
-                        warn!(conn_id = %conn_id_writer, "Connection heartbeat timed out");
-                        let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
-                            code: 1000,
-                            reason: "Heartbeat timeout".into(),
-                        }))).await;
+                        warn!(conn_id = %conn_for_writer.id, "Connection heartbeat timed out");
+                        if !conn_for_writer.is_close_sent() {
+                            let _ = ws_sender.send(ws::Message::Close(Some(ws::CloseFrame {
+                                code: 1000,
+                                reason: "Heartbeat timeout".into(),
+                            }))).await;
+                        }
                         return;
                     }
 
@@ -298,19 +300,27 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
                     // Enforce MaxMessageSize validation before reading / dispatching frame
                     if bin.len() > max_message_size {
                         warn!(conn_id = %conn_for_reader.id, "Frame exceeded max message size limit");
+                        conn_for_reader.close_with(1009, "Message too big");
                         break;
                     }
 
                     conn_for_reader.metrics.on_message_received(bin.len());
-                    if let Ok(packet) = Message::decode_strict_with_limit(bin, max_message_size) {
-                        if packet.event == "join" {
-                            if let Some(ref auth) = room_auth_checker {
-                                if !auth(&conn_for_reader, &packet.room) {
-                                    continue;
+                    match Message::decode_strict_with_limit(bin, max_message_size) {
+                        Ok(packet) => {
+                            if packet.event == "join" {
+                                if let Some(ref auth) = room_auth_checker {
+                                    if !auth(&conn_for_reader, &packet.room) {
+                                        continue;
+                                    }
                                 }
                             }
+                            hub.dispatch(conn_for_reader.clone(), packet).await;
                         }
-                        hub.dispatch(conn_for_reader.clone(), packet).await;
+                        Err(err) => {
+                            warn!(conn_id = %conn_for_reader.id, error = %err, "Malformed binary frame received");
+                            conn_for_reader.close_with(1002, "Malformed packet");
+                            break;
+                        }
                     }
                 }
                 ws::Message::Close(_) => break,
@@ -327,15 +337,21 @@ async fn handle_socket(socket: WebSocket, state: AppState, claims: HashMap<Strin
 
     let abort_notify = conn.abort_notify.clone();
 
-    // Mutual Task Cancellation: if either task completes or backpressure triggers, terminate immediately
+    // Mutual Task Cancellation: if either task completes or backpressure triggers, terminate cleanly
     tokio::select! {
         _ = &mut writer_task => {
             reader_task.abort();
         }
         _ = &mut reader_task => {
+            if conn.is_close_sent() {
+                let _ = tokio::time::timeout(Duration::from_millis(500), &mut writer_task).await;
+            }
             writer_task.abort();
         }
         _ = abort_notify.notified() => {
+            if conn.is_close_sent() {
+                let _ = tokio::time::timeout(Duration::from_millis(500), &mut writer_task).await;
+            }
             writer_task.abort();
             reader_task.abort();
         }

@@ -22,18 +22,37 @@ import {
 } from "../index.js";
 
 function create_mock_ws() {
-    return {
+    let closed_code = null;
+    let closed_reason = null;
+    let close_call_count = 0;
+    let ready_state = 1;
+
+    const mock = {
         bufferedAmount: 0,
-        close: function () {},
+        close: function (code, reason) {
+            close_call_count += 1;
+            closed_code = code;
+            closed_reason = reason;
+            ready_state = 3;
+        },
+        get_close_info: function () {
+            return { code: closed_code, count: close_call_count, reason: closed_reason };
+        },
         on: function () {},
         ping: function () {},
-        readyState: 1,
+        get readyState() {
+            return ready_state;
+        },
+        set readyState(val) {
+            ready_state = val;
+        },
         send: function (_data, _opts, cb) {
             if (typeof cb === "function") {
                 cb();
             }
         }
     };
+    return mock;
 }
 
 // -----------------------------------------------------------------------------
@@ -129,7 +148,7 @@ test("Message framing: Length prefix overflow boundary checks", function () {
 });
 
 // -----------------------------------------------------------------------------
-// 2. Hub Room Lifecycle & Token-Bucket Rate Limiter
+// 2. Hub Room Lifecycle, Rate Limiter & Explicit CloseWith Disconnect
 // -----------------------------------------------------------------------------
 
 test("Hub: Atomic join, leave, presence tracking, and empty room cleanup", async function () {
@@ -171,6 +190,29 @@ test("Hub: Token-bucket control-plane rate limiting for join/leave", function ()
 
     // 4th event must be rate limited
     assert.equal(conn.allow_control_event(), false);
+});
+
+test("Hub: Explicit close_with and hub.disconnect with status codes and no duplicate close calls", function () {
+    const hub = create_hub();
+    const mock_ws = create_mock_ws();
+    const conn = create_conn("disconnect_user", mock_ws, hub);
+
+    hub.add_conn(conn);
+    assert.ok(hub.get_conn("disconnect_user") !== undefined);
+
+    const ok = hub.disconnect("disconnect_user", 4001, "Authentication failed");
+    assert.equal(ok, true);
+
+    const close_info = mock_ws.get_close_info();
+    assert.equal(close_info.code, 4001);
+    assert.equal(close_info.reason, "Authentication failed");
+    assert.equal(close_info.count, 1, "ws.close must be called exactly once");
+    assert.equal(hub.get_conn("disconnect_user"), undefined);
+
+    // Subsequent close/disconnect attempts must NOT trigger a second close message
+    conn.close_with(4002, "Duplicate disconnect");
+    conn.cleanup();
+    assert.equal(mock_ws.get_close_info().count, 1, "ws.close must not be called a second time");
 });
 
 test("Hub: Reserved event registration & duplicate handler guards", function () {

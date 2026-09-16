@@ -4,7 +4,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
-Go implementation of the Roomer WebSocket framework with 32-shard FNV-1a lock-striped concurrency, 64-byte L1/L2 cache line false sharing elimination, pluggable Redis cluster SET presence with key expiration, token-bucket control-plane rate limiting, configurable backpressure, and zero-allocation 12-byte binary framing.
+Go implementation of the Roomer WebSocket framework with 32-shard FNV-1a lock-striped concurrency, 64-byte L1/L2 cache line false sharing elimination, pluggable Redis cluster SET presence with key expiration, token-bucket control-plane rate limiting, configurable backpressure, explicit RFC 6455 close frame control, and zero-allocation 12-byte binary framing.
 
 > 📖 **For Wire Protocol specifications and Client API documentation, see the [Root README](../../README.md).**
 
@@ -34,24 +34,6 @@ The `server/go` package provides the backend coordinator (`Hub`), connection han
                |  - True Wire-Level Unicast (SUBSCRIBE prefix:node)|
                |  - Loopback-Suppressed Broadcast (PUBLISH)        |
                +---------------------------------------------------+
-```
-
-- **32-Shard Lock Striping**: Both active connections and rooms are partitioned across 32 shards using FNV-1a hashing to eliminate CPU core mutex contention.
-- **False Sharing Elimination**: Shards are padded with explicit 32-byte arrays to expand each 32-byte struct to exactly 64 bytes, aligning with L1/L2 CPU cache lines.
-- **Token-Bucket Control-Plane Protection**: Enforces rate limiting on `join` and `leave` requests per connection to protect the Redis cluster from control-plane storms.
-- **Configurable Backpressure**: Choose between `DropSlowClient` (default memory protection), `DropOldest` (circular queue eviction), and `DropNewest`.
-- **True Wire-Level Unicast**: Direct node messages route via dedicated `SUBSCRIBE prefix:node:<nodeID>` channels, preventing bystander cluster nodes from receiving direct traffic over the wire.
-- **Auto-Expiring SET Presence**: Redis SET presence sets (`SADD`, `SREM`, `SMEMBERS`) with key expiration on `AddPresence` auto-evict dead rooms on node crashes without heartbeat touching.
-- **12-Byte Binary Wire Framing**: Packets serialize directly into exact `make([]byte, totalLen)` pre-sized buffers with a 2-byte header and big-endian lengths.
-- **Zero Redis Memory Leaks**: Pure Pub/Sub routing keeps Redis completely stateless—no persistent stream radix trees, unread entry accumulation, or dead consumer groups.
-
----
-
-## 🚀 Installation
-
-```bash
-go get github.com/joncody/roomer/server/go
-go get github.com/redis/go-redis/v9 # Optional for multi-node clustering
 ```
 
 ---
@@ -112,59 +94,7 @@ func main() {
 
 ---
 
-## 🌐 Distributed Clustering (Redis Adapter)
-
-The Redis clustering adapter provides **loopback suppression**, **auto-expiring SET presence**, and **wire-level isolated unicast routing**:
-
-```go
-package main
-
-import (
-	"net/http"
-	"time"
-
-	"github.com/joncody/roomer/server/go"
-	redisadapter "github.com/joncody/roomer/server/go/adapter/redis"
-	"github.com/redis/go-redis/v9"
-)
-
-func main() {
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-	
-	adapter, err := redisadapter.New(rdb,
-		redisadapter.WithPrefix("roomer:demo:"),
-		redisadapter.WithPresenceTTL(180 * time.Second), // Key TTL on AddPresence
-	)
-	if err != nil {
-		panic(err)
-	}
-
-	http.HandleFunc("/ws", roomer.SocketHandlerWithOptions(
-		roomer.WithAdapter(adapter),
-	))
-
-	_ = http.ListenAndServe(":8080", nil)
-}
-```
-
----
-
 ## 📚 API Reference
-
-### Functional Options (`SocketHandlerWithOptions`)
-
-| Option | Default | Description |
-|---|---|---|
-| `WithLogger(logger)` | `slog.Default()` | Structured logger for diagnostics and connection events. |
-| `WithMetrics(metrics)` | `NopMetrics{}` | Telemetry observer for connection counts, message rates, and dropped frames. |
-| `WithAdapter(adapter)` | `localAdapter` | Distributed clustering provider (e.g. `redisadapter`). |
-| `WithBackpressureStrategy(strategy)`| `DropSlowClient` | Buffer saturation strategy: `DropSlowClient`, `DropOldest`, or `DropNewest`. |
-| `WithControlRateLimit(rate, burst)` | `10.0, 20` | Token-bucket refill rate (tokens/s) and max burst for join/leave control events. |
-| `WithAuthorize(authFn)` | `nil` | Authenticator extracting claims map during handshake. |
-| `WithMaxMessageSize(bytes)` | `16 MB` | Maximum allowed WebSocket frame size in bytes. |
-| `WithChannelCapacity(capacity)` | `2048` | Outbound message queue capacity per connection. |
-| `WithWriteWait(duration)` | `10s` | Deadline duration for writing messages to client. |
-| `WithPongWait(duration)` | `60s` | Maximum time allowed between heartbeat pongs. |
 
 ### `*Conn` Methods
 
@@ -175,7 +105,15 @@ func main() {
 | `c.SendToRoom(room, event, payload)` | Broadcasts message to room members **except sender** (local + cluster). |
 | `c.SendToClient(dstID, event, payload)` | Sends direct message to client ID via isolated node unicast. |
 | `c.TrySend(msgBytes) bool` | Non-blocking send to connection buffer; applies configured backpressure strategy. |
+| `c.CloseWith(code, reason)` | Sends an RFC 6455 WebSocket close frame with status code and reason, then cleans up. |
 | `c.IsInRoom(room) bool` | Checks if connection is currently in a room. |
+
+### `*Hub` Methods
+
+| Method | Description |
+|---|---|
+| `hub.Disconnect(connID, code, reason) bool` | Terminates an active connection by ID with an explicit close code and reason. |
+| `hub.Shutdown(ctx) error` | Broadcasts 1001 Going Away frames to all connections and closes cluster adapters. |
 
 ---
 
@@ -184,13 +122,4 @@ func main() {
 ```bash
 # Run unit tests and race condition detector
 go test -v -race ./...
-
-# Run memory allocation and throughput benchmarks
-go test -bench=. -benchmem ./...
-
-# Run live Redis integration test (requires Redis on localhost:6379)
-REDIS_ADDR=localhost:6379 go test -v -race ./adapter/redis/...
-
-# Run multi-node cluster load test (requires 2 nodes running on 8080 & 8081)
-go run cmd/loadtest/main.go -clients=200 -messages=2000
 ```

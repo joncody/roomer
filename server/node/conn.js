@@ -59,6 +59,7 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, control_rate_l
 
     const rooms = Object.create(null);
     let is_closed = false;
+    let close_sent = false;
     let is_alive = true;
     let control_tokens = control_burst_val;
     let last_control_check = Date.now();
@@ -132,13 +133,37 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, control_rate_l
         hub.leave_all_rooms(self);
         hub.remove_conn(id);
         if (
+            close_sent === false &&
+            ws !== null &&
+            typeof ws === "object" &&
+            (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) &&
+            typeof ws.close === "function"
+        ) {
+            close_sent = true;
+            try {
+                ws.close();
+            } catch (ignore) {}
+        }
+    }
+
+    function close_with(code, reason) {
+        if (is_closed === true || close_sent === true) {
+            return;
+        }
+        close_sent = true;
+        is_closed = true;
+        hub.leave_all_rooms(self);
+        hub.remove_conn(id);
+        if (
             ws !== null &&
             typeof ws === "object" &&
             (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) &&
             typeof ws.close === "function"
         ) {
             try {
-                ws.close();
+                const status_code = (typeof code === "number" && code >= 1000 ? code : 1000);
+                const reason_str = (typeof reason === "string" ? reason : "");
+                ws.close(status_code, reason_str);
             } catch (ignore) {}
         }
     }
@@ -156,8 +181,8 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, control_rate_l
                 return false;
             }
 
-            // DropSlowClient
-            cleanup();
+            // DropSlowClient: send RFC 6455 1008 Policy Violation close frame
+            close_with(1008, "Slow client buffer overflow");
             return false;
         }
 
@@ -186,7 +211,7 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, control_rate_l
 
     function check_heartbeat() {
         if (is_alive === false) {
-            cleanup();
+            close_with(1000, "Heartbeat timeout");
             return;
         }
         is_alive = false;
@@ -200,6 +225,7 @@ function create_conn(id, ws, hub, claims, capacity, backpressure, control_rate_l
         check_heartbeat,
         claims: Object.freeze(conn_claims),
         cleanup,
+        close_with,
         id,
         is_in_room,
         joined_rooms,

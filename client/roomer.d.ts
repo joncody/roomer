@@ -21,6 +21,7 @@ export interface RoomerOptions {
 
 export interface Room extends EventEmitter {
     readonly name: string;
+    bufferedAmount(): number;
     clearListeners(exceptions?: string[]): Room;
     close?(): Room;
     forceClose(is_disconnect?: boolean): Room;
@@ -31,8 +32,10 @@ export interface Room extends EventEmitter {
     open(): boolean;
     parse(packet: Packet): void;
     purge?(): Room;
+    readyState(): "connecting" | "open" | "closing" | "closed";
     rooms?(): Readonly<Record<string, Room>>;
     send(event: string, payload?: string | ArrayBuffer | Uint8Array | object | number | boolean, dst?: string): Room;
+    url(): string;
 }
 
 declare function roomer(url: string, options?: RoomerOptions): Room;

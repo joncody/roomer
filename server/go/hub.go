@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const shardCount = 32
@@ -119,6 +121,15 @@ func (h *Hub) getConn(id string) (*Conn, bool) {
 	defer shard.mu.RUnlock()
 	c, ok := shard.conns[id]
 	return c, ok
+}
+
+// Disconnect terminates an active connection by ID with a custom WebSocket close code and reason.
+func (h *Hub) Disconnect(connID string, code int, reason string) bool {
+	if c, ok := h.getConn(connID); ok {
+		c.CloseWith(code, reason)
+		return true
+	}
+	return false
 }
 
 // addConn adds a new connection to the hub, registers with cluster node registry, and tracks metrics.
@@ -364,7 +375,7 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 	}
 
 	for _, c := range conns {
-		c.cleanup()
+		c.CloseWith(websocket.CloseGoingAway, "server shutting down")
 	}
 
 	h.cfgMu.RLock()

@@ -27,6 +27,11 @@ type Conn struct {
 	controlMu     sync.Mutex
 	controlTokens float64
 	controlLast   time.Time
+	writeMu       sync.Mutex
+	closeMu       sync.Mutex
+	closeSent     atomic.Bool
+	closeCode     int
+	closeReason   string
 }
 
 func (c *Conn) trackRoom(room string) bool {
@@ -153,9 +158,9 @@ func (c *Conn) TrySend(msg []byte) bool {
 			if c.config.Logger != nil {
 				c.config.Logger.Warn("Conn dropped message (buffer full or slow client)", "conn_id", c.ID)
 			}
-			// Trigger teardown once asynchronously without spawning duplicate goroutines
+			// Trigger teardown with RFC 6455 policy violation close code
 			if atomic.CompareAndSwapInt32(&c.cleaningUp, 0, 1) {
-				go c.cleanup()
+				go c.CloseWith(websocket.ClosePolicyViolation, "slow client buffer overflow")
 			}
 			return false
 		}
@@ -178,6 +183,22 @@ func (c *Conn) SendToClient(dstID, event string, payload []byte) {
 	} else {
 		c.hub.sendDirectToCluster(dstID, msg)
 	}
+}
+
+// CloseWith sends a WebSocket close frame with an RFC 6455 status code and reason, then cleans up.
+func (c *Conn) CloseWith(code int, reason string) {
+	c.closeMu.Lock()
+	if code == 0 {
+		code = websocket.CloseNormalClosure
+	}
+	c.closeCode = code
+	c.closeReason = reason
+	c.closeMu.Unlock()
+
+	if c.closeSent.CompareAndSwap(false, true) {
+		_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+	}
+	c.cleanup()
 }
 
 // dispatch routes an incoming message to handlers, direct recipients, or rooms.
@@ -284,6 +305,7 @@ func (c *Conn) readPump() {
 			if c.config.Logger != nil {
 				c.config.Logger.Warn("Message exceeded MaxMessageSize", "conn_id", c.ID, "size", len(data), "max", c.config.MaxMessageSize)
 			}
+			c.CloseWith(websocket.CloseMessageTooBig, "message too big")
 			return
 		}
 		if c.config.Metrics != nil {
@@ -294,17 +316,20 @@ func (c *Conn) readPump() {
 			if c.config.Logger != nil {
 				c.config.Logger.Warn("Malformed binary packet received", "conn_id", c.ID)
 			}
+			c.CloseWith(websocket.CloseProtocolError, "malformed binary packet")
 			return
 		}
 		c.dispatch(msg)
 	}
 }
 
-// write writes a message with a specified WebSocket message type and deadline.
+// write writes a message with a specified WebSocket message type and deadline under synchronization.
 func (c *Conn) write(mt int, payload []byte) error {
 	if c.socket == nil {
 		return nil
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	_ = c.socket.SetWriteDeadline(time.Now().Add(c.config.WriteWait))
 	return c.socket.WriteMessage(mt, payload)
 }
@@ -321,14 +346,34 @@ func (c *Conn) writePump() {
 		select {
 		case msg, ok := <-c.send:
 			if !ok {
-				_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
+				if c.closeSent.CompareAndSwap(false, true) {
+					c.closeMu.Lock()
+					code := c.closeCode
+					reason := c.closeReason
+					c.closeMu.Unlock()
+					if code == 0 {
+						code = websocket.CloseGoingAway
+						reason = "server shutting down"
+					}
+					_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+				}
 				return
 			}
 			if err := c.write(websocket.BinaryMessage, msg); err != nil {
 				return
 			}
 		case <-c.done:
-			_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down"))
+			if c.closeSent.CompareAndSwap(false, true) {
+				c.closeMu.Lock()
+				code := c.closeCode
+				reason := c.closeReason
+				c.closeMu.Unlock()
+				if code == 0 {
+					code = websocket.CloseGoingAway
+					reason = "server shutting down"
+				}
+				_ = c.write(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+			}
 			return
 		case <-ticker.C:
 			if err := c.write(websocket.PingMessage, nil); err != nil {

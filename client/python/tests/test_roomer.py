@@ -1,12 +1,14 @@
 """
 Comprehensive test suite for the Roomer Python client.
 Covers 12-byte wire framing, pre-allocated struct packing, malformed
-input rejection, event emissions, room state machines, and lifecycle cleanup.
+input rejection, event emissions, room state machines, readyState, buffered_amount,
+and url properties, and lifecycle cleanup.
 """
 
 import json
 import pytest
 from roomer import (
+    DEFAULT_FLAGS,
     HEADER_OVERHEAD,
     PROTOCOL_VERSION,
     EventEmitter,
@@ -50,12 +52,14 @@ def test_protocol_roundtrip_binary():
         event="state",
         dst="",
         src="server",
-        payload=payload_bin
+        payload=payload_bin,
+        flags=0x07
     )
 
     decoded = decode_message(raw)
     assert decoded is not None
     assert decoded.version == PROTOCOL_VERSION
+    assert decoded.flags == 0x07
     assert decoded.payload == payload_bin
 
 
@@ -165,7 +169,7 @@ def test_emitter_off():
 
 
 # ------------------------------------------------------------------------------
-# 3. Room State Machine & Lifecycle Cleanup Tests
+# 3. Room State Machine, Lifecycle Cleanup & State Accessors
 # ------------------------------------------------------------------------------
 
 def test_room_join_ack_state_transition():
@@ -253,7 +257,12 @@ def test_room_leave_ack_cleans_up_client_registry():
 
 
 def test_reserved_event_guard():
-    root = Room("root", lambda *args: None, lambda n: None, lambda: True)
+    root = Room(
+        "root",
+        lambda *args: None,
+        lambda n: None,
+        lambda: True
+    )
     root._is_open = True
 
     with pytest.raises(ValueError, match="Cannot send reserved event"):
@@ -272,3 +281,26 @@ def test_root_room_special_methods():
     assert callable(getattr(root, "close"))
     assert callable(getattr(root, "purge"))
     assert callable(getattr(root, "rooms"))
+
+
+def test_client_and_room_ready_state_and_buffered_amount_and_url():
+    client = RoomerClient("ws://localhost:8080/ws", reconnect=False)
+    assert client.ready_state == "closed"
+    assert client.buffered_amount == 0
+    assert client.url == "ws://localhost:8080/ws"
+
+    root = client.root
+    assert root.ready_state == "closed"
+    assert root.get_ready_state() == "closed"
+    assert root.buffered_amount == 0
+    assert root.get_buffered_amount() == 0
+    assert root.url == "ws://localhost:8080/ws"
+    assert root.get_url() == "ws://localhost:8080/ws"
+
+    lobby = client.get_room("lobby")
+    assert lobby.ready_state == "closed"
+    assert lobby.get_ready_state() == "closed"
+    assert lobby.buffered_amount == 0
+    assert lobby.get_buffered_amount() == 0
+    assert lobby.url == "ws://localhost:8080/ws"
+    assert lobby.get_url() == "ws://localhost:8080/ws"

@@ -318,6 +318,9 @@ class Room(EventEmitter):
         get_room_fn: Callable[[str], Room],
         is_socket_open_fn: Callable[[], bool],
         remove_room_fn: Callable[[str], None] | None = None,
+        get_ready_state_fn: Callable[[], str] | None = None,
+        get_buffered_amount_fn: Callable[[], int] | None = None,
+        get_url_fn: Callable[[], str] | None = None,
     ) -> None:
         super().__init__()
         self.name = name
@@ -325,6 +328,9 @@ class Room(EventEmitter):
         self._get_room = get_room_fn
         self._is_socket_open = is_socket_open_fn
         self._remove_room = remove_room_fn
+        self._get_ready_state = get_ready_state_fn or (lambda: "closed")
+        self._get_buffered_amount = get_buffered_amount_fn or (lambda: 0)
+        self._get_url = get_url_fn or (lambda: "")
 
         self._member_id: str = ""
         self._is_open: bool = False
@@ -344,6 +350,33 @@ class Room(EventEmitter):
     def open(self) -> bool:
         """Method alias for is_open."""
         return self._is_open
+
+    @property
+    def ready_state(self) -> str:
+        """Connection state string: 'connecting' | 'open' | 'closing' | 'closed'."""
+        return self._get_ready_state()
+
+    def get_ready_state(self) -> str:
+        """Method alias for ready_state property."""
+        return self._get_ready_state()
+
+    @property
+    def buffered_amount(self) -> int:
+        """Number of bytes queued for transmission in outbound send queue."""
+        return self._get_buffered_amount()
+
+    def get_buffered_amount(self) -> int:
+        """Method alias for buffered_amount property."""
+        return self._get_buffered_amount()
+
+    @property
+    def url(self) -> str:
+        """WebSocket server endpoint URL."""
+        return self._get_url()
+
+    def get_url(self) -> str:
+        """Method alias for url property."""
+        return self._get_url()
 
     def members(self) -> list[str]:
         """Returns a shallow copy of active member IDs in this room."""
@@ -476,6 +509,7 @@ class RoomerClient:
         self._task: asyncio.Task[None] | None = None
         self._reconnect_delay: float = initial_delay
         self._send_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._queued_bytes: int = 0
 
         self._root = self.get_room("root")
 
@@ -484,9 +518,40 @@ class RoomerClient:
         """Returns the default 'root' room instance."""
         return self._root
 
+    @property
+    def ready_state(self) -> str:
+        """Returns current connection state ('connecting', 'open', 'closing', 'closed')."""
+        if self._manual_close or not self._running:
+            return "closed"
+        if self._ws is None:
+            return "connecting"
+        state = getattr(self._ws, "state", None)
+        if state is not None:
+            name = getattr(state, "name", None)
+            if name:
+                return str(name).lower()
+        if getattr(self._ws, "open", False):
+            return "open"
+        return "closed"
+
+    @property
+    def buffered_amount(self) -> int:
+        """Returns number of bytes queued in the outbound transmission queue."""
+        return max(0, self._queued_bytes)
+
     def _remove_room(self, name: str) -> None:
         """Removes a room from active tracked rooms."""
         self._rooms.pop(name, None)
+
+    def _drain_send_queue(self) -> None:
+        """Drains any buffered outbound packets and resets queued byte count."""
+        while not self._send_queue.empty():
+            try:
+                self._send_queue.get_nowait()
+                self._send_queue.task_done()
+            except (asyncio.QueueEmpty, ValueError):
+                break
+        self._queued_bytes = 0
 
     def get_room(self, name: str) -> Room:
         """Retrieves or instantiates a room client interface by name."""
@@ -501,6 +566,9 @@ class RoomerClient:
             get_room_fn=self.get_room,
             is_socket_open_fn=self.is_connected,
             remove_room_fn=self._remove_room,
+            get_ready_state_fn=lambda: self.ready_state,
+            get_buffered_amount_fn=lambda: self.buffered_amount,
+            get_url_fn=lambda: self.url,
         )
 
         if name == "root":
@@ -544,6 +612,7 @@ class RoomerClient:
             raw = encode_message(room, event, dst, src, payload)
             try:
                 self._send_queue.put_nowait(raw)
+                self._queued_bytes += len(raw)
             except (asyncio.QueueFull, RuntimeError):
                 pass
 
@@ -577,6 +646,7 @@ class RoomerClient:
                         while self._running and self._ws is ws:
                             try:
                                 raw = await self._send_queue.get()
+                                self._queued_bytes = max(0, self._queued_bytes - len(raw))
                                 await ws.send(raw)
                                 self._send_queue.task_done()
                             except (asyncio.CancelledError, OSError, websockets.exceptions.WebSocketException):
@@ -607,6 +677,7 @@ class RoomerClient:
                     except asyncio.CancelledError:
                         pass
                 self._ws = None
+                self._drain_send_queue()
                 is_reconnecting = self.reconnect and not self._manual_close and self._running
                 for r in list(self._rooms.values()):
                     r.force_close(is_disconnect=is_reconnecting)
@@ -623,8 +694,12 @@ class RoomerClient:
         """Gracefully closes all rooms and the WebSocket connection."""
         self._manual_close = True
         self._running = False
-        if self._ws is not None:
-            await self._ws.close()
+        self._drain_send_queue()
+        if self._ws is not None and not getattr(self._ws, "closed", False):
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
         if self._task is not None:
             self._task.cancel()
             try:

@@ -97,6 +97,15 @@ function create_hub(options) {
         return conns[id];
     }
 
+    function disconnect(conn_id, code, reason) {
+        const conn = conns[conn_id];
+        if (conn !== undefined) {
+            conn.close_with(code, reason);
+            return true;
+        }
+        return false;
+    }
+
     function add_conn(conn) {
         conns[conn.id] = conn;
         adapter.register_node(conn.id).catch(function () {});
@@ -261,7 +270,7 @@ function create_hub(options) {
     async function shutdown() {
         Object.keys(conns).forEach(function (id) {
             try {
-                conns[id].ws.close(1001, "Server shutting down");
+                conns[id].close_with(1001, "Server shutting down");
             } catch (ignore) {}
         });
         Object.keys(conns).forEach(function (id) {
@@ -277,6 +286,7 @@ function create_hub(options) {
         add_conn,
         broadcast_room,
         configure,
+        disconnect,
         dispatch,
         get_cluster_presence,
         get_conn,

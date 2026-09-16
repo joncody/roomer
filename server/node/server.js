@@ -143,7 +143,7 @@ function create_roomer_server(http_server, options) {
 
             // Enforce MaxMessageSize validation before reading / dispatching frame
             if (buf.length > max_payload) {
-                ws.close(1009, "Message too big");
+                conn.close_with(1009, "Message too big");
                 return;
             }
 
@@ -151,6 +151,9 @@ function create_roomer_server(http_server, options) {
             const msg = decode_message(buf, max_payload);
             if (msg !== null) {
                 hub.dispatch(conn, msg).catch(function () {});
+            } else {
+                conn.close_with(1002, "Malformed packet");
+                return;
             }
         });
 

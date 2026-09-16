@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-#![doc(html_root_url = "https://docs.rs/roomer/1.2.0")]
+#![doc(html_root_url = "https://docs.rs/roomer/1.2.1")]
 
 //! # `roomer` – High-Performance Room-Based WebSocket Framework
 //!

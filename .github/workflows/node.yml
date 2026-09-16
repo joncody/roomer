@@ -1,0 +1,63 @@
+name: Node.js CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/node/**'
+      - 'client/**'
+      - '.github/workflows/node.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'server/node/**'
+      - 'client/**'
+      - '.github/workflows/node.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: server/node
+
+jobs:
+  test:
+    name: Node.js Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20.x, 22.x]
+    services:
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 2s
+          --health-retries 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: server/node/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Test Suite with Live Redis Integration
+        env:
+          REDIS_ADDR: localhost:6379
+        run: npm test

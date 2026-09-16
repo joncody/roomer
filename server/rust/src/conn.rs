@@ -57,6 +57,7 @@ pub struct Conn {
     /// Asynchronous notification channel signaling immediate connection teardown.
     pub abort_notify: Arc<Notify>,
     is_aborted: AtomicBool,
+    close_sent: AtomicBool,
     control_limiter: Mutex<ControlLimiter>,
 }
 
@@ -112,6 +113,7 @@ impl Conn {
             backpressure,
             abort_notify: Arc::new(Notify::new()),
             is_aborted: AtomicBool::new(false),
+            close_sent: AtomicBool::new(false),
             control_limiter: Mutex::new(ControlLimiter {
                 tokens: burst,
                 last_refill: Instant::now(),
@@ -154,8 +156,9 @@ impl Conn {
                 self.metrics.on_message_dropped();
                 match self.backpressure {
                     BackpressureStrategy::DropSlowClient => {
-                        // Immediately signal connection teardown to prevent zombie connections
+                        // Immediately signal connection teardown with RFC 1008 policy violation
                         if !self.is_aborted.swap(true, Ordering::SeqCst) {
+                            self.try_send_close(1008, "Slow client buffer overflow");
                             self.abort_notify.notify_one();
                         }
                         false
@@ -170,11 +173,29 @@ impl Conn {
         }
     }
 
-    /// Sends a WebSocket close frame to the connection.
+    /// Sends a WebSocket close frame to the connection ensuring only a single close message is dispatched.
     pub fn try_send_close(&self, code: u16, reason: impl Into<String>) -> bool {
+        if self.close_sent.swap(true, Ordering::SeqCst) {
+            return false;
+        }
         self.send_tx
             .try_send(OutboundMessage::Close(code, reason.into()))
             .is_ok()
+    }
+
+    /// Sends a WebSocket close frame with status code and reason, then triggers connection termination.
+    pub fn close_with(&self, code: u16, reason: impl Into<String>) -> bool {
+        let sent = self.try_send_close(code, reason);
+        if !sent && !self.is_aborted.swap(true, Ordering::SeqCst) {
+            self.abort_notify.notify_one();
+        }
+        sent
+    }
+
+    /// Returns `true` if a close frame has already been scheduled or sent.
+    #[must_use]
+    pub fn is_close_sent(&self) -> bool {
+        self.close_sent.load(Ordering::Relaxed)
     }
 
     /// Broadcasts a message to all members in a given room except this connection.

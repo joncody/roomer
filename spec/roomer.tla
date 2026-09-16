@@ -23,7 +23,7 @@ RefillAmount == 2
 \* [1B version][1B flags][2B room_len][room][2B event_len][event][1B dst_len][dst][1B src_len][src][4B payload_len][payload]
 WirePacket == [
     version: {1},
-    flags: {0},
+    flags: 0..255,
     room_len: 0..65535,
     event_len: 0..65535,
     dst_len: 0..255,
@@ -166,7 +166,7 @@ WireFormatValid ==
         \A i \in 1..Len(client_buffers[c]) :
             LET pkt == client_buffers[c][i] IN
                 /\ pkt.version = 1
-                /\ pkt.flags = 0
+                /\ pkt.flags <= 255
                 /\ pkt.room_len <= 65535
                 /\ pkt.event_len <= 65535
                 /\ pkt.dst_len <= 255

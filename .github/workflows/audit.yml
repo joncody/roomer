@@ -1,10 +1,23 @@
-name: Security & Audit
+name: Cargo Audit & Deny
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+    paths:
+      - 'server/rust/**'
+      - '.github/workflows/audit.yml'
   pull_request:
-    branches: [ main ]
+    branches: [main]
+    paths:
+      - 'server/rust/**'
+      - '.github/workflows/audit.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   audit-deny:

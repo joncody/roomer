@@ -94,6 +94,40 @@ async fn test_conn_control_plane_rate_limiter() {
 }
 
 #[tokio::test]
+async fn test_conn_close_with_and_hub_disconnect() {
+    let hub = Hub::new();
+    let (tx, mut rx) = mpsc::channel(100);
+    let conn = Conn::new(
+        "disconnect_user".into(),
+        Default::default(),
+        tx,
+        hub.metrics(),
+    );
+    hub.add_conn(conn.clone());
+
+    // Hub.disconnect sends close frame and initiates teardown
+    let disconnected = hub.disconnect("disconnect_user", 4001, "Invalid authentication key");
+    assert!(disconnected);
+
+    let received = rx.recv().await.expect("should receive close frame");
+    match received {
+        OutboundMessage::Close(code, reason) => {
+            assert_eq!(code, 4001);
+            assert_eq!(reason, "Invalid authentication key");
+        }
+        _ => panic!("Expected OutboundMessage::Close"),
+    }
+
+    // Verify duplicate close_with calls are suppressed and do not queue multiple close frames
+    let duplicate = conn.close_with(4002, "Duplicate disconnect");
+    assert!(!duplicate);
+    assert!(
+        rx.try_recv().is_err(),
+        "no duplicate close message should be queued"
+    );
+}
+
+#[tokio::test]
 async fn test_handler_registration_guards() {
     let hub = Hub::new();
 

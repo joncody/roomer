@@ -135,6 +135,15 @@ impl Hub {
         self.conns.get(id).map(|r| r.value().clone())
     }
 
+    /// Terminates an active connection by ID with an explicit WebSocket close code and reason.
+    pub fn disconnect(&self, conn_id: &str, code: u16, reason: impl Into<String>) -> bool {
+        if let Some(conn) = self.get_conn(conn_id) {
+            conn.close_with(code, reason)
+        } else {
+            false
+        }
+    }
+
     /// Adds a connection to the active hub registry and tracks node registration.
     pub fn add_conn(&self, conn: Arc<Conn>) {
         self.conns.insert(conn.id.clone(), conn.clone());

@@ -205,6 +205,8 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data, flags)
  * @typedef {Object} Room
  * @property {string} name
  *     The room channel name.
+ * @property {() => number} bufferedAmount
+ *     Returns the number of bytes queued for transmission on the WebSocket.
  * @property {(exceptions?: string[]) => Room} clearListeners
  *     Removes registered event listeners except those in exceptions.
  * @property {() => Room} [close]
@@ -225,10 +227,14 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data, flags)
  *     Parses an incoming binary packet and dispatches events.
  * @property {() => Room} [purge]
  *     Leaves all non-root rooms simultaneously (root only).
+ * @property {() => "connecting" | "open" | "closing" | "closed"} readyState
+ *     Returns the current connection lifecycle state.
  * @property {() => Readonly<Object.<string, Room>>} [rooms]
  *     Returns a read-only map of all active room instances.
  * @property {(event: string, payload?: *, dst?: string) => Room} send
  *     Sends a message packet to the room or directly to a member.
+ * @property {() => string} url
+ *     Returns the WebSocket server endpoint URL.
  * @property {(type: string, fn: Function) => Room} on
  *     Subscribes a listener callback to an event.
  * @property {(type: string, fn: Function) => Room} once
@@ -237,6 +243,8 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data, flags)
  *     Unsubscribes a listener callback from an event.
  * @property {(type: string, ...args: *) => boolean} emit
  *     Synchronously invokes listener callbacks for an event.
+ * @property {(type: string, fn: Function) => Room} removeListener
+ *     Removes a listener callback for the specified event type.
  * @property {(type?: string) => Room} removeAllListeners
  *     Removes all listeners or those for a specified event.
  * @property {(type?: string) => Function[]} listeners
@@ -439,6 +447,58 @@ function roomer(url, options) {
         let is_open = false;
         let member_id = "";
         let self;
+
+        /**
+         * Returns the number of bytes queued for transmission on the WebSocket.
+         *
+         * @returns {number} Queued buffer byte count.
+         */
+        function getBufferedAmount() {
+            if (socket !== undefined && socket !== null) {
+                return socket.bufferedAmount;
+            }
+            return 0;
+        }
+
+        /**
+         * Returns current lifecycle state of underlying WebSocket connection.
+         *
+         * @returns {"connecting" | "open" | "closing" | "closed"} State string.
+         */
+        function getReadyState() {
+            if (socket === undefined || socket === null || manual_close === true) {
+                return "closed";
+            }
+            switch (socket.readyState) {
+            case 0:
+                return "connecting";
+            case 1:
+                return "open";
+            case 2:
+                return "closing";
+            case 3:
+                return "closed";
+            default:
+                return "closed";
+            }
+        }
+
+        /**
+         * Returns the WebSocket server endpoint URL.
+         *
+         * @returns {string} WebSocket URL.
+         */
+        function getUrl() {
+            if (
+                socket !== undefined &&
+                socket !== null &&
+                typeof socket.url === "string" &&
+                socket.url !== ""
+            ) {
+                return socket.url;
+            }
+            return url;
+        }
 
         /**
          * Clears registered listeners except those explicitly listed.
@@ -648,6 +708,7 @@ function roomer(url, options) {
         }
 
         const room_methods = {
+            bufferedAmount: getBufferedAmount,
             clearListeners,
             forceClose,
             id: getId,
@@ -657,7 +718,9 @@ function roomer(url, options) {
             name,
             open: getIsOpen,
             parse,
-            send
+            readyState: getReadyState,
+            send,
+            url: getUrl
         };
 
         if (name === "root") {
@@ -669,7 +732,11 @@ function roomer(url, options) {
             room_methods.close = function () {
                 manual_close = true;
                 clear_reconnect_timer();
-                if (socket !== undefined) {
+                if (
+                    socket !== undefined &&
+                    socket !== null &&
+                    (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+                ) {
                     try {
                         socket.close();
                     } catch (err) {

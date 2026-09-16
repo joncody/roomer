@@ -220,7 +220,53 @@ func TestConn_TokenBucketRateLimiter(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 5. Concurrency, Race Condition & Metrics Tests
+// 5. Explicit CloseWith & Hub Disconnect Tests
+// -----------------------------------------------------------------------------
+
+func TestConn_CloseWithAndHubDisconnect(t *testing.T) {
+	h := NewHub()
+	c := &Conn{
+		ID:            "disconnect_test_conn",
+		hub:           h,
+		send:          make(chan []byte, 10),
+		done:          make(chan struct{}),
+		rooms:         make(map[string]struct{}),
+		config:        DefaultConfig(),
+		controlTokens: 20.0,
+		controlLast:   time.Now(),
+	}
+	h.addConn(c)
+
+	// Hub.Disconnect calls CloseWith and removes connection from registry
+	ok := h.Disconnect(c.ID, 4001, "Authentication failed")
+	if !ok {
+		t.Fatalf("expected Disconnect to return true for active connection")
+	}
+
+	c.closeMu.Lock()
+	if c.closeCode != 4001 || c.closeReason != "Authentication failed" {
+		t.Errorf("expected closeCode 4001 and reason 'Authentication failed', got %d %q", c.closeCode, c.closeReason)
+	}
+	c.closeMu.Unlock()
+
+	select {
+	case <-c.done:
+	default:
+		t.Errorf("expected connection done channel to be closed")
+	}
+
+	if _, found := h.getConn(c.ID); found {
+		t.Errorf("expected connection to be removed from hub after disconnect")
+	}
+
+	// Verify closeSent ensures multiple calls do not re-send
+	if !c.closeSent.Load() {
+		t.Errorf("expected closeSent to be true")
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 6. Concurrency, Race Condition & Metrics Tests
 // -----------------------------------------------------------------------------
 
 func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
@@ -318,7 +364,7 @@ func TestHub_GracefulShutdown(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 6. Benchmarks
+// 7. Benchmarks
 // -----------------------------------------------------------------------------
 
 func BenchmarkMessage_Bytes(b *testing.B) {

@@ -1,0 +1,99 @@
+name: Security & Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/rust/**'
+      - 'server/go/**'
+      - 'server/node/**'
+      - 'client/python/**'
+      - '.github/workflows/security.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'server/rust/**'
+      - 'server/go/**'
+      - 'server/node/**'
+      - 'client/python/**'
+      - '.github/workflows/security.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: Cargo Deny (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Cargo Deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: server/rust/Cargo.toml
+          arguments: --config server/rust/deny.toml --all-features
+
+  govulncheck:
+    name: Govulncheck (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: server/go/go.sum
+
+      - name: Run Govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: server/go/go.mod
+          work-dir: server/go
+
+  npm-audit:
+    name: npm Audit (Node.js)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: server/node/package-lock.json
+
+      - name: Run npm audit
+        working-directory: server/node
+        run: npm audit --audit-level=high
+
+  pip-audit:
+    name: Pip Audit (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run pip-audit
+        working-directory: client/python
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit .
+          pip-audit

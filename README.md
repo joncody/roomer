@@ -19,11 +19,11 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 
 | Directory | Scope & Purpose |
 |---|---|
-| **`client/`** | Zero-dependency JavaScript / TypeScript client (`roomer.js`, `bytecursor.js`, `emitter.js`). Provides Crockfordian functional encapsulation, binary framing, and exponential reconnection. |
+| **`client/`** | Zero-dependency JavaScript / TypeScript client (`roomer.js`, `bytecursor.js`, `emitter.js`). Provides Crockfordian functional encapsulation, binary framing, readyState, bufferedAmount, URL reflection, and exponential reconnection. |
 | **`client/python/`** | Asynchronous Python client SDK (`roomer.py`, `pyproject.toml`). Built for `asyncio` with native binary packing via `struct.pack_into()`, event emitters, and context managers. |
-| **`server/go/`** | Production Go server implementation (Go 1.26+, 32-shard FNV-1a lock striping with 64B cache line padding, token-bucket control-plane rate limiter, Redis SET presence adapter). |
-| **`server/rust/`** | Production Rust server implementation (Rust 1.88+ / Edition 2024, Axum 0.8, Tokio, `DashMap` concurrency with 64B cache alignment, token-bucket rate limiting, zero-copy `bytes::Bytes` framing). |
-| **`server/node/`** | Production Node.js server implementation (Node 22+, Crockfordian functional encapsulation, single-allocation binary framing, token-bucket control-plane rate limiter, Redis SET adapter). |
+| **`server/go/`** | Production Go server implementation (Go 1.26+, 32-shard FNV-1a lock striping with 64B cache line padding, token-bucket control-plane rate limiter, Redis SET presence adapter, RFC 6455 close status frames). |
+| **`server/rust/`** | Production Rust server implementation (Rust 1.88+ / Edition 2024, Axum 0.8, Tokio, `DashMap` concurrency with 64B cache alignment, token-bucket rate limiting, zero-copy `bytes::Bytes` framing, RFC 6455 close control). |
+| **`server/node/`** | Production Node.js server implementation (Node 22+, Crockfordian functional encapsulation, single-allocation binary framing, token-bucket control-plane rate limiter, Redis SET adapter, RFC 6455 close status frames). |
 | **`spec/`** | Formal TLA+ specification (`roomer.tla`, `roomer.cfg`) verifying safety invariants, token-bucket rate limits, and room membership state machines. |
 | **`examples/`** | Unified cross-platform HTML/JS frontend demonstration and interactive room client. |
 | **`tests/`** | Automated browser-based test suite verifying packet encoding, event emission, exception filtering, and teardown. |
@@ -35,11 +35,13 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 - **Optimized 12-Byte Binary Wire Framing**: Packets start with a 2-byte `[1B Version][1B Flags]` header followed by right-sized Big-Endian length prefixes (Room/Event `uint16`, Dst/Src `uint8`, Payload `uint32`), reducing base header overhead to only 12 bytes.
 - **Triple Server Parity**: Go, Rust, and Node.js implementations share the exact binary wire protocol, Redis envelope format, and loopback suppression contract.
 - **Dual Client Ecosystem**: Native client SDKs in JavaScript/TypeScript (Browser, Node, Bun, Deno) and Python (`asyncio`).
+- **Connection Diagnostics & Backpressure**: Direct access to `.bufferedAmount()`, `.readyState()`, and `.url()` on client handles for telemetry and flow regulation.
 - **Token-Bucket Control-Plane Rate Limiting**: Every connection enforces token-bucket rate limiting on `join` and `leave` control-plane operations to protect Redis and memory from command storms.
 - **False Sharing Elimination**: Shards and metrics structs are padded and aligned to 64-byte L1/L2 CPU cache lines (in Go and Rust) to prevent cross-core cache invalidations.
 - **True Wire-Level Unicast Routing**: Cluster nodes publish broadcasts to `prefix:room:*` channels while direct point-to-point frames travel over dedicated `prefix:node:<nodeID>` channels, preventing bystander nodes from receiving unicast traffic over the wire.
 - **Cluster-Wide Presence with Auto-Expiring Sets**: Distributed Redis SET presence (`SADD`, `SREM`, `SMEMBERS`) with key-level TTL expiration on `AddPresence` eliminates heartbeat-touching overhead while automatically pruning abandoned rooms on server crash.
 - **Configurable Backpressure Policies**: Supports `DropSlowClient` (default memory protection), `DropOldest` (queue eviction), and `DropNewest` buffer management.
+- **Explicit Disconnection Control**: Clean disconnection API (`close_with` / `disconnect`) across Go, Rust, and Node servers sending RFC 6455 status codes before teardown with strict single-close frame guarantees.
 - **Early Size Guarding**: Max message size validation executes before allocating or buffering frame bodies to prevent malicious memory allocation attacks.
 - **Formally Verified (TLA+)**: Proven state invariants prevent disconnected zombie members, buffer leaks, and wire contract violations.
 - **Ultra-High Throughput**: Capable of delivering **>2.6 million messages/second** in Go/Rust and **>260,000 messages/second** in Node.js clustered deployments with sub-millisecond fanout latency.
@@ -72,62 +74,6 @@ All messages (client $\leftrightarrow$ server and server $\leftrightarrow$ serve
 | `payload_len` | `uint32` | 4 Bytes (BE) | Byte length of binary payload. |
 | `payload` | Binary | Variable | Raw message payload data. |
 
-### Example Frame (34 Bytes Total)
-```text
-Field         Value                   Wire Encoding (Big-Endian Hex)
---------------------------------------------------------------------
-version       1                       01
-flags         0                       00
-room          "lobby"                 00 05        6c 6f 62 62 79
-event         "chat"                  00 04        63 68 61 74
-dst           "" (broadcast)          00
-src           "user-123"              08           75 73 65 72 2d 31 32 33
-payload       "Hello"                 00 00 00 05  48 65 6c 6c 6f
-```
-
-### Protocol-Reserved Event Names
-The following event names are managed internally by the roomer protocol and cannot be sent directly via `.send()`:
-- `"join"`, `"leave"`: Membership subscription requests.
-- `"join_ack"`, `"leave_ack"`: Subscription acknowledgments containing member snapshots.
-- `"new_member"`, `"member_left"`: Real-time presence notifications.
-- `"open"`, `"close"`: Connection and room lifecycle events.
-
----
-
-## 🌐 Distributed Clustering Architecture
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor ClientA as Client A (Node 1)
-    participant Node1 as Roomer Node 1
-    participant Redis as Redis (Pub/Sub & Presence Registry)
-    participant Node2 as Roomer Node 2
-    actor ClientB as Client B (Node 2)
-
-    Note over Node1,Node2: 1. Cluster-Wide Presence Sync (Auto-Expiring Redis SET)
-    ClientA->>Node1: Join "lobby" (Subject to Token-Bucket Rate Limiter)
-    Node1->>Redis: SADD roomer:demo:presence:lobby ClientA_UUID
-    Node1->>Redis: EXPIRE roomer:demo:presence:lobby 86400
-    Node1->>Redis: SET roomer:demo:conn_node:ClientA_UUID -> Node1_ID (EX 86400)
-    Node1-->>ClientA: join_ack [Cluster Presence Snapshot]
-
-    Note over Node1,Node2: 2. Broadcast with Loopback Suppression
-    ClientA->>Node1: Broadcast Frame (room: lobby, event: chat)
-    Node1->>ClientA: Local delivery (except sender)
-    Node1->>Redis: PUBLISH roomer:demo:room:lobby [Envelope: Node1_UUID + Packet]
-    Redis-->>Node1: Envelope received (Self-Echo) -> 🚫 Suppressed
-    Redis-->>Node2: Envelope received -> ✅ Decoded & Delivered to Client B
-    Node2->>ClientB: Binary Frame delivered
-
-    Note over Node1,Node2: 3. Targeted True Wire-Level Unicast Routing
-    ClientA->>Node1: Direct Message to ClientB (dst: ClientB_UUID)
-    Node1->>Redis: GET roomer:demo:conn_node:ClientB_UUID -> "Node2_ID"
-    Node1->>Redis: PUBLISH roomer:demo:node:Node2_ID [Envelope + Packet]
-    Redis-->>Node2: Delivered exclusively to Node 2 (Bystanders receive 0 bytes)
-    Node2->>ClientB: Direct Message delivered
-```
-
 ---
 
 ## 📚 Client APIs
@@ -143,12 +89,18 @@ const root = roomer("ws://localhost:8080/ws", { reconnect: true });
 
 root.on("open", () => {
     console.log("Connected to root room! Client ID:", root.id());
+    console.log("Connection State:", root.readyState()); // "open"
+    console.log("WebSocket URL:", root.url());           // "ws://localhost:8080/ws"
 
     const lobby = root.join("lobby");
 
     lobby.on("open", () => {
         console.log("Joined lobby! Active members:", lobby.members());
-        lobby.send("chat", "Hello from JS!");
+        
+        // Check backpressure before large transfers
+        if (lobby.bufferedAmount() < 32768) {
+            lobby.send("chat", "Hello from JS!");
+        }
     });
 
     lobby.on("chat", (payload, senderId) => {
@@ -171,20 +123,29 @@ import asyncio
 from roomer import roomer
 
 async def main():
-    async with roomer("ws://localhost:8080/ws") as root:
-        print(f"Connected to root room! Client ID: {root.id}")
+    # Connect and auto-join the root room (supports auth headers via **kwargs)
+    async with roomer(
+        "ws://localhost:8080/ws",
+        extra_headers={"Authorization": "Bearer my_jwt_token"}
+    ) as root:
+        print(f"Connected to Roomer cluster! Client ID: {root.id}")
+        print(f"Connection State: {root.ready_state}")
+        print(f"WebSocket URL: {root.url}")
 
+        # Join a named room channel
         lobby = root.join("lobby")
 
         @lobby.on("open")
         def on_open():
             print(f"Joined lobby! Active members: {lobby.members()}")
-            lobby.send("chat", "Hello from Python!")
+            if lobby.buffered_amount < 32768:
+                lobby.send("chat", "Hello from Python!")
 
         @lobby.on("chat")
         def on_chat(payload: bytes, sender_id: str):
             print(f"[{sender_id}]: {payload.decode('utf-8')}")
 
+        # Keep running
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
@@ -193,11 +154,14 @@ if __name__ == "__main__":
 
 ---
 
-### `Room` Instance Methods
-| Method (JS) | Method (Python) | Description |
+### `Room` Instance Methods & Properties
+| Method / Property (JS) | Method / Property (Python) | Description |
 |---|---|---|
 | `.id()` | `.id` | Connection UUID assigned by the server. |
 | `.open()` | `.is_open` | `True` if room membership is currently active. |
+| `.readyState()` | `.ready_state` | Returns connection state: `"connecting"`, `"open"`, `"closing"`, or `"closed"`. |
+| `.bufferedAmount()` | `.buffered_amount` | Returns number of bytes queued for transmission in the outbound buffer. |
+| `.url()` | `.url` | Returns the resolved WebSocket endpoint URL string. |
 | `.members()` | `.members()` | Shallow copy array/list of all active member IDs in this room. |
 | `.join(roomName)` | `.join(room_name)` | Subscribes to a room channel over the existing connection (rate-limited). |
 | `.leave()` | `.leave()` | Unsubscribes from the room and notifies the cluster (rate-limited). |
@@ -210,13 +174,34 @@ if __name__ == "__main__":
 
 ---
 
-## 🚀 Server Implementations
+## 📚 Server APIs
 
-| Server | Documentation | Concurrency Engine | Clustering Engine |
-|---|---|---|---|
-| **Go** | [`server/go/README.md`](./server/go/README.md) | Go 1.26, 32-Shard FNV-1a Lock Striping with 64B Padding, Token-Bucket Rate Limiter | `go-redis/v9` UniversalClient (SET Presence) |
-| **Rust** | [`server/rust/README.md`](./server/rust/README.md) | Rust 1.88 (2024), Axum 0.8, Tokio, `DashMap` with 64B Cache Alignment, Token-Bucket Rate Limiter | `redis 0.27` Tokio Multiplexer (SET Presence) |
-| **Node.js** | [`server/node/README.md`](./server/node/README.md) | Node 22+, Functional Closures, `ws`, Token-Bucket Rate Limiter, Libuv Stream Backpressure | `ioredis 5.4` Pub/Sub & SET Presence |
+### 1. Go (`server/go`)
+```go
+// Close connection with custom RFC WebSocket code and reason
+conn.CloseWith(4001, "Invalid credentials")
+
+// Disconnect a client from the Hub
+hub.Disconnect(connID, 4003, "Kicked from server")
+```
+
+### 2. Rust (`server/rust`)
+```rust
+// Close connection with custom RFC WebSocket code and reason
+conn.close_with(4001, "Invalid credentials");
+
+// Disconnect a client from the Hub
+hub.disconnect(&conn_id, 4003, "Kicked from server");
+```
+
+### 3. Node.js (`server/node`)
+```javascript
+// Close connection with custom RFC WebSocket code and reason
+conn.close_with(4001, "Invalid credentials");
+
+// Disconnect a client from the Hub
+hub.disconnect(conn_id, 4003, "Kicked from server");
+```
 
 ---
 
@@ -228,49 +213,9 @@ The project provides a unified automation runner via `make`. Run `make help` to 
 make help
 ```
 
-```text
-Roomer Development & Testing Automation:
-
-  Testing & Quality Assurance
-    test             Run all unit test suites across Go, Rust, Node, and Python
-    test-go          Run Go unit tests with race detector
-    test-rust        Run Rust server unit and integration tests
-    test-node        Run Node.js server test suite
-    test-python      Run Python client SDK test suite
-    check            Run TLA+ formal specification model checking suite
-    tla              Verify formal state invariants in spec/roomer.tla with TLC
-
-  Clustering & Load Testing
-    cluster          Start multi-node Redis cluster with PAIR (default: PAIR=go-rust)
-    cluster-up       Alias for 'cluster'
-    cluster-down     Stop and tear down multi-node cluster containers
-    cluster-test     Orchestrate cluster spinup, readiness wait, load test, and teardown
-    loadtest         Run cluster load test (CLIENTS=50 MESSAGES=500 DELAY=0)
-
-  Infrastructure & Utilities
-    redis            Start standalone Redis container on port 6379
-    redis-up         Alias for 'redis'
-    redis-down       Stop standalone Redis container
-    tla-download     Download tla2tools.jar into repository root
-    help             Display this help guide with available targets
-
-  Configurable Variables
-    PAIR            Cluster server pair (default: go-rust; options: rust-go, go-node, rust-node)
-    CLIENTS         Clients per cluster node for loadtest (default: 50)
-    MESSAGES        Broadcast messages to send in loadtest (default: 500)
-    DELAY           Microseconds between messages in loadtest (default: 0)
-    NODE1_URL       WebSocket URL for Node 1 (default: ws://localhost:8080/ws)
-    NODE2_URL       WebSocket URL for Node 2 (default: ws://localhost:8081/ws)
-    NODES           Comma-separated node URLs (overrides NODE1_URL and NODE2_URL)
-    ROOM            Target room name for loadtest (default: unique timestamped room)
-    PYTEST          Python test runner path (auto-detects client/python/.venv)
-```
-
 ---
 
 ### 1. Unit & Language Test Suites
-
-Run individual or combined language suites with zero overhead:
 
 ```bash
 # Run all language test suites (Go, Rust, Node, Python):
@@ -287,8 +232,6 @@ make test-python   # Python pytest suite (auto-detects virtualenv)
 
 ### 2. Multi-Node Cluster Load Testing
 
-Run automated cross-language cluster integration tests where clients publish and subscribe across heterogeneous servers bridged by Redis:
-
 ```bash
 # Automated cross-server orchestration via Makefile (builds, starts, tests, tears down):
 make cluster-test
@@ -297,72 +240,26 @@ make cluster-test
 PAIR=rust-go make cluster-test
 PAIR=go-node make cluster-test
 PAIR=rust-node make cluster-test
-
-# Orchestrate cluster load tests with custom client and message volumes:
-CLIENTS=100 MESSAGES=1000 make cluster-test
-
-# Or manage the cluster lifecycle manually:
-make cluster-up                      # Spin up cluster containers (default: go-rust)
-make loadtest                        # Execute load test against 8080 and 8081
-make cluster-down                    # Tear down cluster containers
-
-# Execute customized load test runs against active cluster:
-make loadtest CLIENTS=100 MESSAGES=2000 DELAY=50
-make loadtest NODES="ws://localhost:8080/ws,ws://localhost:8081/ws,ws://localhost:8082/ws"
-
-# Or manually start individual single-language cluster setups:
-docker compose -f server/node/docker-compose.yml up --build -d
-# OR
-docker compose -f server/rust/docker-compose.yml up --build -d
-# OR
-docker compose -f server/go/docker-compose.yml up --build -d
-
-# Standalone Go loadtest CLI command:
-go run ./server/go/cmd/loadtest/main.go -node1=ws://localhost:8080/ws -node2=ws://localhost:8081/ws -clients=100 -messages=2000
-
-# Tear down cluster (replace {server} with go, rust, or node)
-docker compose -f server/{server}/docker-compose.yml down
 ```
 
 ---
 
-### 3. Browser Test Suite & Interactive Demo
+### 3. Formal Verification (TLA+)
 
-Start any server implementation and open the automated browser test runner:
-
-```bash
-# Start any server:
-go run ./server/go/examples/main.go
-# OR
-cargo run --manifest-path server/rust/Cargo.toml --example server
-# OR
-cd server/node && npm start
-```
-- **Interactive Chat Demo:** [http://localhost:8080/](http://localhost:8080/)
-- **Automated Browser Test Suite:** [http://localhost:8080/tests/](http://localhost:8080/tests/)
-
----
-
-### 4. Formal Verification (TLA+)
-
-The formal TLA+ model specification (`spec/roomer.tla` and `spec/roomer.cfg`) mathematically verifies safety invariants against race conditions and protocol violations:
-- `TypeOK`: Type consistency across connection registries, presence sets, and buffers.
-- `NoUnconnectedMembers`: Proves disconnected clients can never remain active in room presence.
-- `NotConnectedBufferEmpty`: Proves disconnected clients never hold unconsumed buffer state.
-- `WireFormatValid`: Proves every frame matches the 12-byte header wire format.
+Verify formal protocol and state machine invariants with TLC:
 
 ```bash
-# Run formal verification via Makefile (auto-detects 'tlc', ~/.tla/tla2tools.jar, or local jar):
 make check
-# (or 'make tla')
+```
 
-# Download tla2tools.jar directly if TLC is not installed on your system:
-make tla-download
+---
 
-# Or run directly using the TLC CLI / Java:
-tlc -config spec/roomer.cfg spec/roomer.tla
-# OR
-java -cp ~/.tla/tla2tools.jar tlc2.TLC -config spec/roomer.cfg spec/roomer.tla
+### 4. Build & Cache Artifact Cleanup
+
+Purge compilation outputs, test result caches across all languages (including Go test cache and Docker volumes), and virtual environment caches:
+
+```bash
+make clean
 ```
 
 ---

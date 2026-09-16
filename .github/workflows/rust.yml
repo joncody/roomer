@@ -2,48 +2,129 @@ name: Rust CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+    paths:
+      - 'server/rust/**'
+      - '.github/workflows/rust.yml'
   pull_request:
-    branches: [ main ]
+    branches: [main]
+    paths:
+      - 'server/rust/**'
+      - '.github/workflows/rust.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: server/rust
 
 jobs:
   fmt:
     name: Rustfmt Check
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server/rust
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --check
 
-  test:
-    name: Rust Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    defaults:
-      run:
-        working-directory: server/rust
+      - name: Check Rust Formatting
+        run: cargo fmt --check
+
+  clippy:
+    name: Clippy Linter
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: server/rust
-      - run: cargo test --all-targets --features redis-adapter
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --features redis-adapter -- -D warnings
+
+  test-linux:
+    name: Rust Test & Integration (Linux + Redis)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 2s
+          --health-retries 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/rust
+
+      - name: Run Tests with Live Redis Integration
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --all-targets --features redis-adapter
+
+  test-cross-platform:
+    name: Rust Cross-Platform Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/rust
+
+      - name: Run Unit and Framing Tests
+        run: cargo test --all-targets --features redis-adapter
 
   docs:
     name: Rust Documentation
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server/rust
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo doc --no-deps --features redis-adapter
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server/rust
+
+      - name: Verify Documentation Build
+        run: cargo doc --no-deps --features redis-adapter
