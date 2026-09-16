@@ -2,7 +2,7 @@
 Comprehensive test suite for the Roomer Python client.
 Covers 12-byte wire framing, pre-allocated struct packing, malformed
 input rejection, event emissions, room state machines, readyState, buffered_amount,
-and url properties, and lifecycle cleanup.
+url properties, RFC close codes and reasons, and lifecycle cleanup.
 """
 
 import json
@@ -237,16 +237,22 @@ def test_room_leave_ack_cleans_up_client_registry():
     assert "lobby" in client._rooms
 
     closed = False
+    captured_code = None
+    captured_reason = None
 
     @lobby.on("close")
-    def on_close():
-        nonlocal closed
+    def on_close(code=None, reason=None):
+        nonlocal closed, captured_code, captured_reason
         closed = True
+        captured_code = code
+        captured_reason = reason
 
     # Server confirms leave with leave_ack
     lobby.parse(Packet("lobby", "leave_ack", "", "", b""))
 
     assert closed
+    assert captured_code == 1000
+    assert captured_reason == "Left room"
     assert not lobby.is_open
     assert "lobby" not in client._rooms
 
@@ -254,6 +260,38 @@ def test_room_leave_ack_cleans_up_client_registry():
     rejoined_lobby = client.get_room("lobby")
     assert "lobby" in client._rooms
     assert rejoined_lobby is not lobby
+
+
+def test_room_force_close_propagates_rfc_code_and_reason():
+    room = Room("test_room", lambda *a: None, lambda n: None, lambda: True)
+    room._is_open = True
+
+    captured_code = None
+    captured_reason = None
+
+    @room.on("close")
+    def on_close(code=None, reason=None):
+        nonlocal captured_code, captured_reason
+        captured_code = code
+        captured_reason = reason
+
+    room.force_close(False, code=4001, reason="Authentication failed")
+
+    assert not room.is_open
+    assert captured_code == 4001
+    assert captured_reason == "Authentication failed"
+
+
+def test_roomer_client_default_reconnect_suppression():
+    # 1. Fatal codes must NOT attempt reconnection
+    assert not RoomerClient._default_should_reconnect(1000, "Normal closure")
+    assert not RoomerClient._default_should_reconnect(1008, "Policy violation")
+    assert not RoomerClient._default_should_reconnect(4001, "Unauthorized")
+    assert not RoomerClient._default_should_reconnect(4003, "Forbidden")
+
+    # 2. Abnormal / transient network drops MUST attempt reconnection
+    assert RoomerClient._default_should_reconnect(1006, "Abnormal closure")
+    assert RoomerClient._default_should_reconnect(1001, "Going away")
 
 
 def test_reserved_event_guard():

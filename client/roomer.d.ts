@@ -17,14 +17,16 @@ export interface RoomerOptions {
     initial_delay?: number;
     /** Maximum backoff reconnect delay in ms. Default: 5000 */
     max_delay?: number;
+    /** Optional predicate to decide if client should reconnect based on close code and reason. */
+    should_reconnect?: (code: number, reason: string) => boolean;
 }
 
 export interface Room extends EventEmitter {
     readonly name: string;
     bufferedAmount(): number;
     clearListeners(exceptions?: string[]): Room;
-    close?(): Room;
-    forceClose(is_disconnect?: boolean): Room;
+    close?(code?: number, reason?: string): Room;
+    forceClose(is_disconnect?: boolean, code?: number, reason?: string): Room;
     id(): string;
     join(room_name: string): Room;
     leave(): Room;

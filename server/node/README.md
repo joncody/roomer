@@ -42,6 +42,29 @@ The `server/node` package provides the backend coordinator (`create_hub`), conne
 
 ---
 
+## 🏁 Running the Standalone Demo & Test Server
+
+The Node.js implementation includes a self-contained demonstration server (`examples/main.js`) serving the static HTML/JS frontend demo, automated browser test suite, and clustered WebSocket endpoint.
+
+### Run from Repository Root
+```bash
+cd server/node && npm start
+```
+
+### Run with Custom Port or Redis Cluster
+```bash
+cd server/node
+PORT=8081 REDIS_ADDR=localhost:6379 npm start
+```
+
+### Endpoints (Default Port: 8080)
+Once running, open your browser to:
+* **Interactive Chat Demo:** [http://localhost:8080/](http://localhost:8080/)
+* **Automated Browser Test Suite:** [http://localhost:8080/tests/](http://localhost:8080/tests/)
+* **WebSocket Endpoint:** `ws://localhost:8080/ws`
+
+---
+
 ## 🧠 Quick Start
 
 ```javascript

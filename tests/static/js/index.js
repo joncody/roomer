@@ -415,20 +415,34 @@ function run_all_tests() {
     );
 
     // -------------------------------------------------------------------------
-    // GROUP 7: Force Close, Root Close & Sub-Room Diagnostics
+    // GROUP 7: Force Close, Root Close, RFC Status Code & Reason Propagation
     // -------------------------------------------------------------------------
-    runner.group("7. Force Close, Root Close & Sub-Room Diagnostics");
+    runner.group("7. Force Close, Root Close, RFC Status Code & Reason Propagation");
 
     let close_fired = false;
-    root.on("close", function () {
+    let captured_close_code = null;
+    let captured_close_reason = null;
+
+    root.on("close", function (code, reason) {
         close_fired = true;
+        captured_close_code = code;
+        captured_close_reason = reason;
     });
 
-    root.forceClose();
+    // Explicitly test passing RFC status code and custom reason
+    root.forceClose(false, 4001, "Invalid credentials");
 
     runner.assert(
         close_fired === true,
         "forceClose() triggers 'close' event"
+    );
+    runner.assert(
+        captured_close_code === 4001,
+        "forceClose() delivers RFC status code (4001) to listener"
+    );
+    runner.assert(
+        captured_close_reason === "Invalid credentials",
+        "forceClose() delivers status reason ('Invalid credentials') to listener"
     );
     runner.assert(
         root.open() === false,
@@ -440,8 +454,13 @@ function run_all_tests() {
     fresh_client.parse(packet);
 
     let fresh_close_fired = false;
-    fresh_client.on("close", function () {
+    let fresh_close_code = null;
+    let fresh_close_reason = null;
+
+    fresh_client.on("close", function (code, reason) {
         fresh_close_fired = true;
+        fresh_close_code = code;
+        fresh_close_reason = reason;
     });
 
     // Join and activate a sub-room channel
@@ -457,8 +476,13 @@ function run_all_tests() {
     sub_room.parse(sub_ack_packet);
 
     let sub_close_fired = false;
-    sub_room.on("close", function () {
+    let sub_close_code = null;
+    let sub_close_reason = null;
+
+    sub_room.on("close", function (code, reason) {
         sub_close_fired = true;
+        sub_close_code = code;
+        sub_close_reason = reason;
     });
 
     runner.assert(
@@ -482,12 +506,16 @@ function run_all_tests() {
         "root.close() is available on root room interface"
     );
 
-    // Execute root.close() to tear down connection and all sub-rooms
-    fresh_client.close();
+    // Execute root.close() to tear down connection and all sub-rooms with custom RFC status code
+    fresh_client.close(1008, "Policy violation: slow client");
 
     runner.assert(
         fresh_close_fired === true,
         "root.close() triggers room teardown and close event"
+    );
+    runner.assert(
+        fresh_close_code === 1008 && fresh_close_reason === "Policy violation: slow client",
+        "root.close() propagates RFC code (1008) and reason to root close handler"
     );
     runner.assert(
         fresh_client.open() === false,
@@ -500,6 +528,10 @@ function run_all_tests() {
     runner.assert(
         sub_close_fired === true,
         "root.close() cascades teardown and close event to sub-rooms"
+    );
+    runner.assert(
+        sub_close_code === 1008 && sub_close_reason === "Policy violation: slow client",
+        "root.close() cascades RFC code (1008) and reason to sub-room close handlers"
     );
     runner.assert(
         sub_room.open() === false,

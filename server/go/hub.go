@@ -77,11 +77,16 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 	if adapter != nil {
 		h.adapter = adapter
 		if err := h.adapter.Subscribe(func(channelSuffix string, msg *Message) {
+			rawBytes := msg.Bytes()
+			if h.metrics != nil {
+				h.metrics.OnClusterReceived(len(rawBytes))
+			}
+
 			// Targeted node unicast direct messaging: "node:node_UUID"
 			if strings.HasPrefix(channelSuffix, "node:") {
 				if msg.Dst != "" {
 					if dst, ok := h.getConn(msg.Dst); ok {
-						dst.TrySend(msg.Bytes())
+						dst.TrySend(rawBytes)
 					}
 				}
 				return
@@ -90,7 +95,7 @@ func (h *Hub) Configure(adapter Adapter, metrics Metrics, logger *slog.Logger) {
 			// Cross-node direct messaging via root broadcast
 			if msg.Dst != "" {
 				if dst, ok := h.getConn(msg.Dst); ok {
-					dst.TrySend(msg.Bytes())
+					dst.TrySend(rawBytes)
 				}
 				return
 			}
@@ -324,10 +329,11 @@ func (h *Hub) sendDirectToCluster(dstID string, msg *Message) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
+			wireBytes := msg.Bytes()
 			if targetNode, err := adapter.GetNodeForConn(ctx, dstID); err == nil && targetNode != "" {
 				if err := adapter.PublishDirect(ctx, targetNode, msg); err == nil {
 					if metrics != nil {
-						metrics.OnClusterPublish(len(msg.Payload))
+						metrics.OnClusterPublish(len(wireBytes))
 					}
 					return
 				}
@@ -335,7 +341,7 @@ func (h *Hub) sendDirectToCluster(dstID string, msg *Message) {
 			// Fallback to cluster-wide root broadcast if node mapping not resolved
 			if err := adapter.Publish(ctx, "root", msg); err == nil {
 				if metrics != nil {
-					metrics.OnClusterPublish(len(msg.Payload))
+					metrics.OnClusterPublish(len(wireBytes))
 				}
 			}
 		}()
@@ -353,9 +359,10 @@ func (h *Hub) publishToCluster(roomName string, msg *Message) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			wireBytes := msg.Bytes()
 			if err := adapter.Publish(ctx, roomName, msg); err == nil {
 				if metrics != nil {
-					metrics.OnClusterPublish(len(msg.Payload))
+					metrics.OnClusterPublish(len(wireBytes))
 				}
 			}
 		}()

@@ -10,15 +10,15 @@
 function create_nop_metrics() {
     return Object.freeze({
         onClusterDropped: function () {},
-        onClusterPublish: function () {},
-        onClusterReceived: function () {},
+        onClusterPublish: function (_bytes) {},
+        onClusterReceived: function (_bytes) {},
         onConnect: function () {},
         onDisconnect: function () {},
         onMessageDropped: function () {},
-        onMessageReceived: function () {},
-        onMessageSent: function () {},
-        onRoomCreated: function () {},
-        onRoomDeleted: function () {}
+        onMessageReceived: function (_bytes) {},
+        onMessageSent: function (_bytes) {},
+        onRoomCreated: function (_room) {},
+        onRoomDeleted: function (_room) {}
     });
 }
 
@@ -39,6 +39,8 @@ function create_in_memory_metrics() {
     let bytes_received = 0;
     let cluster_published = 0;
     let cluster_received = 0;
+    let bytes_cluster_published = 0;
+    let bytes_cluster_received = 0;
 
     function onConnect() {
         active_connections += 1;
@@ -80,12 +82,18 @@ function create_in_memory_metrics() {
         }
     }
 
-    function onClusterPublish() {
+    function onClusterPublish(bytes) {
         cluster_published += 1;
+        if (typeof bytes === "number") {
+            bytes_cluster_published += bytes;
+        }
     }
 
-    function onClusterReceived() {
+    function onClusterReceived(bytes) {
         cluster_received += 1;
+        if (typeof bytes === "number") {
+            bytes_cluster_received += bytes;
+        }
     }
 
     function onClusterDropped() {}
@@ -94,6 +102,8 @@ function create_in_memory_metrics() {
         return Object.freeze({
             active_connections,
             active_rooms,
+            bytes_cluster_published,
+            bytes_cluster_received,
             bytes_received,
             bytes_sent,
             cluster_published,

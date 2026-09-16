@@ -24,6 +24,11 @@ func TestShard_CacheLinePadding(t *testing.T) {
 	if roomShardSize < 64 {
 		t.Errorf("expected roomShard size >= 64 bytes to eliminate false sharing, got %d", roomShardSize)
 	}
+
+	metricsSize := unsafe.Sizeof(InMemoryMetrics{})
+	if metricsSize%64 != 0 {
+		t.Errorf("expected InMemoryMetrics size to be a multiple of 64 bytes to prevent cache bouncing (got %d)", metricsSize)
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -266,8 +271,57 @@ func TestConn_CloseWithAndHubDisconnect(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// 6. Concurrency, Race Condition & Metrics Tests
+// 6. Concurrency, Race Condition, Cluster & Metrics Tests
 // -----------------------------------------------------------------------------
+
+type testClusterAdapter struct {
+	Adapter
+	subHandler func(string, *Message)
+}
+
+func (a *testClusterAdapter) Publish(ctx context.Context, room string, msg *Message) error {
+	return nil
+}
+
+func (a *testClusterAdapter) PublishDirect(ctx context.Context, targetNodeID string, msg *Message) error {
+	return nil
+}
+
+func (a *testClusterAdapter) Subscribe(handler func(string, *Message)) error {
+	a.subHandler = handler
+	return nil
+}
+
+func TestHub_ClusterMetricsTracking(t *testing.T) {
+	metrics := NewInMemoryMetrics()
+	h := NewHub()
+
+	mockAd := &testClusterAdapter{
+		Adapter: newLocalAdapter(),
+	}
+
+	h.Configure(mockAd, metrics, nil)
+
+	// 1. Outbound publish tracks ClusterPublished with full wire frame size
+	msg := NewMessage("lobby", "chat", "", "user_1", []byte("hello cluster"))
+	h.publishToCluster("lobby", msg)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if metrics.ClusterPublished() != 1 {
+		t.Errorf("expected ClusterPublished 1, got %d", metrics.ClusterPublished())
+	}
+
+	// 2. Inbound subscription callback tracks ClusterReceived
+	incoming := NewMessage("lobby", "chat", "", "remote_user", []byte("from cluster"))
+	if mockAd.subHandler != nil {
+		mockAd.subHandler("room:lobby", incoming)
+	}
+
+	if metrics.ClusterReceived() != 1 {
+		t.Errorf("expected ClusterReceived 1, got %d", metrics.ClusterReceived())
+	}
+}
 
 func TestHub_ConcurrentShardedAccessAndMetrics(t *testing.T) {
 	metrics := NewInMemoryMetrics()

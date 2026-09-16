@@ -199,6 +199,8 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data, flags)
  *     Initial reconnection backoff delay in milliseconds.
  * @property {number} [max_delay=5000]
  *     Maximum reconnection backoff ceiling in milliseconds.
+ * @property {(code: number, reason: string) => boolean} [should_reconnect]
+ *     Optional callback to evaluate whether to reconnect given an RFC close code and reason.
  */
 
 /**
@@ -209,10 +211,10 @@ function new_message(room_name, event_name, dst_id, src_id, payload_data, flags)
  *     Returns the number of bytes queued for transmission on the WebSocket.
  * @property {(exceptions?: string[]) => Room} clearListeners
  *     Removes registered event listeners except those in exceptions.
- * @property {() => Room} [close]
+ * @property {(code?: number, reason?: string) => Room} [close]
  *     Explicitly closes connection and all active rooms (root only).
- * @property {(is_disconnect?: boolean) => Room} forceClose
- *     Forces the room to close locally and clears member state.
+ * @property {(is_disconnect?: boolean, code?: number, reason?: string) => Room} forceClose
+ *     Forces the room to close locally, emits close with code/reason, and clears member state.
  * @property {() => string} id
  *     Returns the client ID assigned to this connection.
  * @property {(room_name: string) => Room} join
@@ -268,7 +270,14 @@ function roomer(url, options) {
     const opts = Object.assign({
         initial_delay: 500,
         max_delay: 5000,
-        reconnect: true
+        reconnect: true,
+        should_reconnect: function (code) {
+            // Do not reconnect on clean exit (1000), policy violation (1008), or auth/kick error codes (4000-4999)
+            if (code === 1000 || code === 1008 || (code >= 4000 && code < 5000)) {
+                return false;
+            }
+            return true;
+        }
     }, options);
 
     /** @type {Object.<string, Room>} */
@@ -335,7 +344,7 @@ function roomer(url, options) {
             );
             Object.keys(rooms).forEach(function (r_name) {
                 if (rooms[r_name] !== undefined) {
-                    rooms[r_name].forceClose(is_reconnecting);
+                    rooms[r_name].forceClose(is_reconnecting, 1006, "Connection error");
                 }
             });
             if (is_reconnecting === true) {
@@ -405,14 +414,23 @@ function roomer(url, options) {
             }
         };
 
-        socket.onclose = function () {
+        socket.onclose = function (e) {
+            const code = (e && typeof e.code === "number") ? e.code : 1006;
+            const reason = (e && typeof e.reason === "string") ? e.reason : "";
+            const should_retry = (
+                typeof opts.should_reconnect === "function"
+                ? opts.should_reconnect(code, reason)
+                : true
+            );
             const is_reconnecting = (
                 manual_close === false &&
-                opts.reconnect === true
+                opts.reconnect === true &&
+                should_retry === true
             );
+
             Object.keys(rooms).forEach(function (r_name) {
                 if (rooms[r_name] !== undefined) {
-                    rooms[r_name].forceClose(is_reconnecting);
+                    rooms[r_name].forceClose(is_reconnecting, code, reason);
                 }
             });
 
@@ -525,13 +543,17 @@ function roomer(url, options) {
          *
          * @param {boolean} [is_disconnect=false] - Whether this close is due
          *     to socket drop.
+         * @param {number} [code=1000] - RFC 6455 closure status code.
+         * @param {string} [reason=""] - Closure reason string.
          * @returns {Room} The room instance.
          */
-        function forceClose(is_disconnect) {
+        function forceClose(is_disconnect, code, reason) {
+            const close_code = (typeof code === "number") ? code : 1000;
+            const close_reason = (typeof reason === "string") ? reason : "";
             if (is_open === true) {
                 is_open = false;
                 members.length = 0;
-                self.emit("close");
+                self.emit("close", close_code, close_reason);
             }
             if (is_disconnect !== true) {
                 member_id = "";
@@ -652,7 +674,7 @@ function roomer(url, options) {
                 break;
 
             case "leave_ack":
-                self.emit("close");
+                self.emit("close", 1000, "Left room");
                 is_open = false;
                 members.length = 0;
                 member_id = "";
@@ -727,25 +749,30 @@ function roomer(url, options) {
             /**
              * Explicitly closes the WebSocket connection and all active rooms.
              *
+             * @param {number} [code=1000] - RFC 6455 close status code.
+             * @param {string} [reason="Client closed"] - Closure reason.
              * @returns {Room} The root room instance.
              */
-            room_methods.close = function () {
+            room_methods.close = function (code, reason) {
                 manual_close = true;
                 clear_reconnect_timer();
+                const status_code = (typeof code === "number") ? code : 1000;
+                const reason_str = (typeof reason === "string") ? reason : "Client closed";
+
                 if (
                     socket !== undefined &&
                     socket !== null &&
                     (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
                 ) {
                     try {
-                        socket.close();
+                        socket.close(status_code, reason_str);
                     } catch (err) {
                         console.error("Failed to close WebSocket: ", err);
                     }
                 }
                 Object.keys(rooms).forEach(function (r_name) {
                     if (rooms[r_name] !== undefined) {
-                        rooms[r_name].forceClose(false);
+                        rooms[r_name].forceClose(false, status_code, reason_str);
                     }
                 });
                 return self;

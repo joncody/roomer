@@ -1,9 +1,70 @@
 use bytes::Bytes;
 use roomer::{
-    BackpressureStrategy, Conn, HandlerError, Hub, InMemoryMetrics, Message, OutboundMessage,
+    Adapter, AdapterError, BackpressureStrategy, Conn, HandlerError, Hub, InMemoryMetrics, Message,
+    OutboundMessage,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+#[derive(Default)]
+struct MockClusterAdapter {
+    sub_cb: std::sync::Mutex<Option<roomer::adapter::SubscribeCallback>>,
+}
+
+#[async_trait::async_trait]
+impl Adapter for MockClusterAdapter {
+    async fn publish_raw(&self, _room: &str, _raw_msg: &[u8]) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    async fn publish_direct_raw(
+        &self,
+        _target_node_id: &str,
+        _raw_msg: &[u8],
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    async fn subscribe(
+        &self,
+        callback: roomer::adapter::SubscribeCallback,
+    ) -> Result<(), AdapterError> {
+        *self.sub_cb.lock().unwrap() = Some(callback);
+        Ok(())
+    }
+
+    async fn add_presence(&self, _room: &str, _conn_id: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    async fn remove_presence(&self, _room: &str, _conn_id: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    async fn get_presence(&self, _room: &str) -> Result<Vec<String>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    async fn register_node(&self, _conn_id: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    async fn unregister_node(&self, _conn_id: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    async fn get_node_for_conn(&self, _conn_id: &str) -> Result<Option<String>, AdapterError> {
+        Ok(None)
+    }
+
+    fn node_id(&self) -> &str {
+        "mock-node"
+    }
+
+    async fn close(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+}
 
 #[tokio::test]
 async fn test_hub_concurrent_join_leave_and_direct_routing() {
@@ -68,6 +129,36 @@ async fn test_hub_concurrent_join_leave_and_direct_routing() {
         "empty room should be garbage collected"
     );
     assert_eq!(metrics.active_rooms(), 0);
+}
+
+#[tokio::test]
+async fn test_hub_cluster_metrics_tracking() {
+    let metrics = Arc::new(InMemoryMetrics::new());
+    let hub = Hub::new();
+    let adapter = Arc::new(MockClusterAdapter::default());
+    hub.configure(adapter.clone(), metrics.clone()).await;
+
+    // 1. Broadcast triggers on_cluster_publish
+    let msg = Message::new("room1", "chat", "", "u1", Bytes::from_static(b"test"));
+    hub.broadcast_room(None, msg);
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(metrics.cluster_published(), 1);
+
+    // 2. Incoming cluster message triggers on_cluster_received
+    let sub_cb = adapter
+        .sub_cb
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("subscriber registered");
+    sub_cb(
+        "room:room1",
+        "remote_node",
+        Bytes::from_static(b"cluster_payload"),
+    );
+
+    assert_eq!(metrics.cluster_received(), 1);
 }
 
 #[tokio::test]

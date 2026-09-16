@@ -19,8 +19,8 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 
 | Directory | Scope & Purpose |
 |---|---|
-| **`client/`** | Zero-dependency JavaScript / TypeScript client (`roomer.js`, `bytecursor.js`, `emitter.js`). Provides Crockfordian functional encapsulation, binary framing, readyState, bufferedAmount, URL reflection, and exponential reconnection. |
-| **`client/python/`** | Asynchronous Python client SDK (`roomer.py`, `pyproject.toml`). Built for `asyncio` with native binary packing via `struct.pack_into()`, event emitters, and context managers. |
+| **`client/`** | Zero-dependency JavaScript / TypeScript client (`roomer.js`, `bytecursor.js`, `emitter.js`). Provides Crockfordian functional encapsulation, binary framing, readyState, bufferedAmount, URL reflection, RFC close code introspection, and exponential reconnection. |
+| **`client/python/`** | Asynchronous Python client SDK (`roomer.py`, `pyproject.toml`). Built for `asyncio` with native binary packing via `struct.pack_into()`, RFC close code introspection, event emitters, and context managers. |
 | **`server/go/`** | Production Go server implementation (Go 1.26+, 32-shard FNV-1a lock striping with 64B cache line padding, token-bucket control-plane rate limiter, Redis SET presence adapter, RFC 6455 close status frames). |
 | **`server/rust/`** | Production Rust server implementation (Rust 1.88+ / Edition 2024, Axum 0.8, Tokio, `DashMap` concurrency with 64B cache alignment, token-bucket rate limiting, zero-copy `bytes::Bytes` framing, RFC 6455 close control). |
 | **`server/node/`** | Production Node.js server implementation (Node 22+, Crockfordian functional encapsulation, single-allocation binary framing, token-bucket control-plane rate limiter, Redis SET adapter, RFC 6455 close status frames). |
@@ -36,6 +36,7 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 - **Triple Server Parity**: Go, Rust, and Node.js implementations share the exact binary wire protocol, Redis envelope format, and loopback suppression contract.
 - **Dual Client Ecosystem**: Native client SDKs in JavaScript/TypeScript (Browser, Node, Bun, Deno) and Python (`asyncio`).
 - **Connection Diagnostics & Backpressure**: Direct access to `.bufferedAmount()`, `.readyState()`, and `.url()` on client handles for telemetry and flow regulation.
+- **RFC Close Code Introspection & Smart Reconnection**: JavaScript and Python client SDKs propagate RFC 6455 closure status codes and reasons to `.on("close", (code, reason) => ...)`. Non-retryable codes (such as `1000 Normal Closure`, `1008 Policy Violation`, and `4000`–`4999` application/auth kicks) halt reconnection loops, while network disruptions (`1006`) automatically recover with backoff and jitter (customizable via `should_reconnect`).
 - **Token-Bucket Control-Plane Rate Limiting**: Every connection enforces token-bucket rate limiting on `join` and `leave` control-plane operations to protect Redis and memory from command storms.
 - **False Sharing Elimination**: Shards and metrics structs are padded and aligned to 64-byte L1/L2 CPU cache lines (in Go and Rust) to prevent cross-core cache invalidations.
 - **True Wire-Level Unicast Routing**: Cluster nodes publish broadcasts to `prefix:room:*` channels while direct point-to-point frames travel over dedicated `prefix:node:<nodeID>` channels, preventing bystander nodes from receiving unicast traffic over the wire.
@@ -45,6 +46,47 @@ Roomer is a high-throughput, room-based WebSocket framework engineered with zero
 - **Early Size Guarding**: Max message size validation executes before allocating or buffering frame bodies to prevent malicious memory allocation attacks.
 - **Formally Verified (TLA+)**: Proven state invariants prevent disconnected zombie members, buffer leaks, and wire contract violations.
 - **Ultra-High Throughput**: Capable of delivering **>2.6 million messages/second** in Go/Rust and **>260,000 messages/second** in Node.js clustered deployments with sub-millisecond fanout latency.
+
+---
+
+## 🏁 Running Standalone Servers (Demo & Test Runner)
+
+Each backend implementation includes a standalone server binary that hosts the static HTML/JS assets, WebSocket endpoint, interactive chat demo, and automated browser test suite.
+
+### 1. Go Server
+```bash
+# Run from repository root:
+go run ./server/go/examples/main.go
+
+# Or run from the server/go directory:
+cd server/go && go run ./examples/main.go
+```
+
+### 2. Rust Server
+```bash
+# Run from repository root:
+cargo run --manifest-path server/rust/Cargo.toml --example server
+
+# Or run from the server/rust directory:
+cd server/rust && cargo run --example server
+
+# Optional: Run with Redis clustering enabled (requires Redis):
+cargo run --manifest-path server/rust/Cargo.toml --example server --features redis-adapter
+```
+
+### 3. Node.js Server
+```bash
+# Run from repository root:
+cd server/node && npm start
+```
+
+### Active Endpoints (Default Port: 8080)
+Once any server is running, navigate to:
+* **Interactive Chat Demo:** [http://localhost:8080/](http://localhost:8080/)
+* **Automated Browser Test Suite:** [http://localhost:8080/tests/](http://localhost:8080/tests/)
+* **WebSocket Endpoint:** `ws://localhost:8080/ws`
+
+*(To change the port, set the `PORT` environment variable, e.g. `PORT=8081 go run ./server/go/examples/main.go`)*
 
 ---
 
@@ -85,7 +127,14 @@ Zero runtime dependencies. Written in Crockfordian functional JavaScript with co
 import roomer from "./client/roomer.js";
 
 // Connect and auto-join the global "root" room
-const root = roomer("ws://localhost:8080/ws", { reconnect: true });
+const root = roomer("ws://localhost:8080/ws", {
+    reconnect: true,
+    // Optional predicate controlling auto-reconnect based on RFC status code
+    should_reconnect: (code, reason) => {
+        // Disallow reconnect on normal closure (1000) or kick (4001)
+        return code !== 1000 && code !== 4001;
+    }
+});
 
 root.on("open", () => {
     console.log("Connected to root room! Client ID:", root.id());
@@ -107,10 +156,18 @@ root.on("open", () => {
         const text = new TextDecoder().decode(payload);
         console.log(`[${senderId}]: ${text}`);
     });
+
+    lobby.on("close", (code, reason) => {
+        console.log(`Lobby closed: [${code}] ${reason}`);
+    });
 });
 
-// Explicitly close all rooms and disconnect
-// root.close();
+root.on("close", (code, reason) => {
+    console.log(`Disconnected from server: [${code}] ${reason}`);
+});
+
+// Explicitly close with custom status code and reason
+// root.close(1000, "Normal departure");
 ```
 
 ---
@@ -145,6 +202,10 @@ async def main():
         def on_chat(payload: bytes, sender_id: str):
             print(f"[{sender_id}]: {payload.decode('utf-8')}")
 
+        @root.on("close")
+        def on_close(code=None, reason=None):
+            print(f"Disconnected from cluster: [{code}] {reason}")
+
         # Keep running
         await asyncio.Event().wait()
 
@@ -167,8 +228,8 @@ if __name__ == "__main__":
 | `.leave()` | `.leave()` | Unsubscribes from the room and notifies the cluster (rate-limited). |
 | `.send(event, payload?, dst?)` | `.send(event, payload=None, dst="")` | Sends a message packet (broadcast to room, or direct to `dst`). |
 | `.clearListeners([exceptions])`| `.clear_listeners(exceptions=None)` | Clears registered listeners except those listed in `exceptions`. |
-| `.forceClose(isDisconnect?)` | `.force_close(is_disconnect=False)` | Closes room state locally and emits `"close"`. |
-| `.close()` *(root only)* | `.close()` *(root only)* | Explicitly tears down the WebSocket connection and closes all active rooms. |
+| `.forceClose(isDisconnect?, code?, reason?)` | `.force_close(is_disconnect=False, code=None, reason=None)` | Closes room locally and emits `"close"` with RFC status code and reason. |
+| `.close(code?, reason?)` *(root only)* | `.close(code=1000, reason="Client closed")` *(root only)* | Explicitly tears down the WebSocket connection with status code/reason. |
 | `.purge()` *(root only)* | `.purge()` *(root only)* | Leaves all non-root rooms simultaneously. |
 | `.rooms()` *(root only)* | `.rooms()` *(root only)* | Read-only map/dict of all active room instances. |
 
@@ -222,7 +283,7 @@ make help
 make test
 
 # Run isolated language test suites:
-make test-go       # Go tests with race detection (-race)
+make test-go       # Go tests with race detection (-race -v)
 make test-rust     # Rust Cargo test suite with redis-adapter feature
 make test-node     # Node.js test runner (node --test)
 make test-python   # Python pytest suite (auto-detects virtualenv)

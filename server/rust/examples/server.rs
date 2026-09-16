@@ -5,7 +5,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
+#[cfg(feature = "redis-adapter")]
+use tracing::warn;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(feature = "redis-adapter")]
@@ -32,38 +34,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let hub = Hub::new();
-    let mut clustered = false;
 
-    // 1. Connect Redis Adapter (SET presence with auto-expiration)
+    // 1. Connect Redis Adapter if feature is enabled and REDIS_URL/REDIS_ADDR is provided
     #[cfg(feature = "redis-adapter")]
-    if let Ok(redis_url) = std::env::var("REDIS_URL").or_else(|_| std::env::var("REDIS_ADDR")) {
-        let mut formatted_url = redis_url.clone();
-        if !formatted_url.starts_with("redis://") && !formatted_url.starts_with("rediss://") {
-            formatted_url = format!("redis://{}", formatted_url);
-        }
-        let prefix = std::env::var("REDIS_PREFIX").unwrap_or_else(|_| "roomer:demo:".into());
-        let metrics = Arc::new(InMemoryMetrics::new());
+    {
+        let mut clustered = false;
+        if let Ok(redis_url) = std::env::var("REDIS_URL").or_else(|_| std::env::var("REDIS_ADDR")) {
+            let mut formatted_url = redis_url.clone();
+            if !formatted_url.starts_with("redis://") && !formatted_url.starts_with("rediss://") {
+                formatted_url = format!("redis://{}", formatted_url);
+            }
+            let prefix = std::env::var("REDIS_PREFIX").unwrap_or_else(|_| "roomer:demo:".into());
+            let metrics = Arc::new(InMemoryMetrics::new());
 
-        info!("Connecting to Redis cluster at {}", formatted_url);
-        match RedisAdapter::builder(&formatted_url)
-            .prefix(&prefix)
-            .presence_ttl(std::time::Duration::from_secs(86400))
-            .build()
-        {
-            Ok(adapter) => {
-                hub.configure(Arc::new(adapter), metrics).await;
-                info!("Configured Redis cluster adapter with SET presence");
-                clustered = true;
+            info!("Connecting to Redis cluster at {}", formatted_url);
+            match RedisAdapter::builder(&formatted_url)
+                .prefix(&prefix)
+                .presence_ttl(std::time::Duration::from_secs(86400))
+                .build()
+            {
+                Ok(adapter) => {
+                    hub.configure(Arc::new(adapter), metrics).await;
+                    info!("Configured Redis cluster adapter with SET presence");
+                    clustered = true;
+                }
+                Err(err) => {
+                    warn!(error = %err, "Could not connect to Redis; running in standalone mode");
+                }
             }
-            Err(err) => {
-                warn!(error = %err, "Could not connect to Redis; running in standalone mode");
-            }
+        }
+
+        if !clustered {
+            info!("Running in standalone single-node mode");
         }
     }
 
-    if !clustered {
-        info!("Running in standalone single-node mode");
-    }
+    #[cfg(not(feature = "redis-adapter"))]
+    info!("Running in standalone single-node mode");
 
     // 2. Register "chat" broadcast handler
     let hub_chat = hub.clone();

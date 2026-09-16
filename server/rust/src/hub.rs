@@ -72,13 +72,17 @@ impl Hub {
         }
         {
             let mut m = self.metrics.write().unwrap();
-            *m = metrics;
+            *m = metrics.clone();
         }
 
         let rooms = Arc::clone(&self.rooms);
         let conns = Arc::clone(&self.conns);
+        let sub_metrics = metrics;
+
         if let Err(err) = adapter
             .subscribe(Arc::new(move |channel_suffix, _sender_node, raw_frame| {
+                sub_metrics.on_cluster_received(raw_frame.len());
+
                 // Targeted unicast direct messaging: "node:node_UUID" or "root"
                 if (channel_suffix.starts_with("node:") || channel_suffix == "root")
                     && let Some(packet) = Message::decode(raw_frame.clone())
@@ -274,6 +278,9 @@ impl Hub {
         let adapter_lock = self.adapter.clone();
         let dst_id_str = msg.dst.clone();
         let encoded = msg.encode();
+        let metrics = self.metrics();
+        let encoded_len = encoded.len();
+
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let adapter = adapter_lock.read().await;
@@ -283,10 +290,13 @@ impl Hub {
                         .await
                         .is_ok()
                 {
+                    metrics.on_cluster_publish(encoded_len);
                     return;
                 }
                 // Fallback to cluster broadcast on root channel
-                let _ = adapter.publish_raw("root", &encoded).await;
+                if adapter.publish_raw("root", &encoded).await.is_ok() {
+                    metrics.on_cluster_publish(encoded_len);
+                }
             });
         }
     }
@@ -300,12 +310,16 @@ impl Hub {
 
         let adapter_lock = self.adapter.clone();
         let room_str = msg.room;
+        let metrics = self.metrics();
+        let encoded_len = encoded.len();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let adapter = adapter_lock.read().await;
                 if let Err(err) = adapter.publish_raw(&room_str, &encoded).await {
                     error!(room = %room_str, error = %err, "Failed to publish message to cluster adapter");
+                } else {
+                    metrics.on_cluster_publish(encoded_len);
                 }
             });
         }

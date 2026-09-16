@@ -32,23 +32,32 @@ func (NopMetrics) OnClusterPublish(bytes int)  {}
 func (NopMetrics) OnClusterReceived(bytes int) {}
 func (NopMetrics) OnClusterDropped()           {}
 
-// InMemoryMetrics tracks atomic counters for testing, debugging, and stats dashboards.
+// InMemoryMetrics tracks atomic counters with 64-byte L1/L2 cache-line padding to eliminate false sharing.
 type InMemoryMetrics struct {
 	activeConnections int64
 	totalConnections  int64
-	activeRooms       int64
-	totalRooms        int64
-	messagesSent      int64
-	messagesReceived  int64
-	messagesDropped   int64
-	bytesSent         int64
-	bytesReceived     int64
-	clusterPublished  int64
-	clusterReceived   int64
-	clusterDropped    int64
+	_                 [48]byte // Pad to 64 bytes
+
+	activeRooms int64
+	totalRooms  int64
+	_           [48]byte // Pad to 64 bytes
+
+	messagesSent    int64
+	bytesSent       int64
+	messagesDropped int64
+	_               [40]byte // Pad to 64 bytes
+
+	messagesReceived int64
+	bytesReceived    int64
+	_                [48]byte // Pad to 64 bytes
+
+	clusterPublished int64
+	clusterReceived  int64
+	clusterDropped   int64
+	_                [40]byte // Pad to 64 bytes
 }
 
-// NewInMemoryMetrics initializes an in-memory atomic metrics tracker.
+// NewInMemoryMetrics initializes an in-memory atomic metrics tracker with cache-line isolation.
 func NewInMemoryMetrics() *InMemoryMetrics {
 	return &InMemoryMetrics{}
 }
@@ -107,3 +116,6 @@ func (m *InMemoryMetrics) MessagesReceived() int64  { return atomic.LoadInt64(&m
 func (m *InMemoryMetrics) MessagesDropped() int64   { return atomic.LoadInt64(&m.messagesDropped) }
 func (m *InMemoryMetrics) BytesSent() int64         { return atomic.LoadInt64(&m.bytesSent) }
 func (m *InMemoryMetrics) BytesReceived() int64     { return atomic.LoadInt64(&m.bytesReceived) }
+func (m *InMemoryMetrics) ClusterPublished() int64  { return atomic.LoadInt64(&m.clusterPublished) }
+func (m *InMemoryMetrics) ClusterReceived() int64   { return atomic.LoadInt64(&m.clusterReceived) }
+func (m *InMemoryMetrics) ClusterDropped() int64    { return atomic.LoadInt64(&m.clusterDropped) }

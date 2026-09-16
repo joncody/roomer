@@ -38,6 +38,31 @@ The `server/go` package provides the backend coordinator (`Hub`), connection han
 
 ---
 
+## 🏁 Running the Standalone Demo & Test Server
+
+The Go implementation includes a self-contained demonstration server binary (`examples/main.go`) serving the static HTML/JS frontend demo, automated browser test suite, and WebSocket endpoint.
+
+### Run from Repository Root
+```bash
+go run ./server/go/examples/main.go
+```
+
+### Run from `server/go` Directory
+```bash
+cd server/go
+go run ./examples/main.go
+```
+
+### Endpoints (Default Port: 8080)
+Once running, open your browser to:
+* **Interactive Chat Demo:** [http://localhost:8080/](http://localhost:8080/)
+* **Automated Browser Test Suite:** [http://localhost:8080/tests/](http://localhost:8080/tests/)
+* **WebSocket Endpoint:** `ws://localhost:8080/ws`
+
+*(To run on a custom port or attach to Redis, pass environment variables: `PORT=8081 REDIS_ADDR=localhost:6379 go run ./examples/main.go`)*
+
+---
+
 ## 🧠 Quick Start
 
 ```go

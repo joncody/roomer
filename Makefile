@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help test test-go test-rust test-node test-python check tla tla-download redis redis-up redis-down cluster cluster-up cluster-down loadtest cluster-test clean
+.PHONY: help test test-go test-rust test-node test-python check tla tla-download redis redis-up redis-down cluster cluster-up cluster-down loadtest cluster-test clean bump
 
 # Auto-detect local virtualenv pytest using absolute paths to avoid 'cd' concatenation bugs
 PYTEST ?= $(if $(wildcard client/python/.venv/bin/pytest),$(CURDIR)/client/python/.venv/bin/pytest,$(if $(wildcard client/python/.venv/bin/python),$(CURDIR)/client/python/.venv/bin/python -m pytest,pytest))
@@ -37,6 +37,7 @@ NODE2_URL ?= ws://localhost:8081/ws
 NODES ?=
 ROOM ?=
 EXTRA_ARGS ?=
+VERSION ?=
 
 help: ## Display this help guide with available targets
 	@echo ""
@@ -49,7 +50,7 @@ help: ## Display this help guide with available targets
 	@grep -E '^(cluster|cluster-[a-z]+|loadtest):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1;37mInfrastructure & Utilities\033[0m"
-	@grep -E '^(redis|redis-[a-z]+|tla-download|tla2tools.jar|clean|help):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^(redis|redis-[a-z]+|tla-download|tla2tools.jar|clean|bump|help):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  \033[1;37mConfigurable Variables\033[0m"
 	@echo "    \033[33mPAIR\033[0m            Cluster server pair (default: go-rust; options: rust-go, go-node, rust-node)"
@@ -61,6 +62,7 @@ help: ## Display this help guide with available targets
 	@echo "    \033[33mNODES\033[0m           Comma-separated node URLs (overrides NODE1_URL and NODE2_URL)"
 	@echo "    \033[33mROOM\033[0m            Target room name for loadtest (default: unique timestamped room)"
 	@echo "    \033[33mPYTEST\033[0m          Python test runner path (auto-detects client/python/.venv)"
+	@echo "    \033[33mVERSION\033[0m         Target semantic version for 'make bump' (e.g. 1.2.2)"
 	@echo ""
 
 test: test-go test-rust test-node test-python ## Run all unit test suites across Go, Rust, Node, and Python
@@ -157,3 +159,12 @@ clean: ## Remove build artifacts, caches, and test artifacts across all language
 	@docker compose -f server/rust/docker-compose.yml down -v --remove-orphans 2>/dev/null || true
 	@redis-cli -p 6379 flushall 2>/dev/null || true
 	@echo "Clean completed."
+
+bump: ## Bump project version across all language packages (usage: make bump VERSION=1.2.2)
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Error: VERSION is required."; \
+		echo "Usage: make bump VERSION=1.2.2"; \
+		exit 1; \
+	fi
+	@chmod +x scripts/bump-version.sh
+	@scripts/bump-version.sh $(VERSION)

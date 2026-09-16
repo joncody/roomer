@@ -57,6 +57,10 @@ function create_hub(options) {
         if (typeof new_adapter === "object" && new_adapter !== null) {
             adapter = new_adapter;
             await adapter.subscribe(function (channel_suffix, _sender_node, raw_frame) {
+                if (typeof metrics.onClusterReceived === "function") {
+                    metrics.onClusterReceived(raw_frame.length);
+                }
+
                 // Targeted unicast direct message
                 if (channel_suffix.startsWith("node:") === true || channel_suffix === "root") {
                     const packet = decode_message(raw_frame);
@@ -130,7 +134,11 @@ function create_hub(options) {
         if (room !== undefined) {
             room.emit_local(exclude_id, raw);
         }
-        adapter.publish_raw(msg.room, raw).catch(function (err) {
+        adapter.publish_raw(msg.room, raw).then(function () {
+            if (typeof metrics.onClusterPublish === "function") {
+                metrics.onClusterPublish(raw.length);
+            }
+        }).catch(function (err) {
             console.error("Failed to publish to cluster adapter:", err);
         });
     }
@@ -203,6 +211,10 @@ function create_hub(options) {
                 return adapter.publish_direct_raw(target_node, raw);
             }
             return adapter.publish_raw("root", raw);
+        }).then(function () {
+            if (typeof metrics.onClusterPublish === "function") {
+                metrics.onClusterPublish(raw.length);
+            }
         }).catch(function () {});
     }
 
@@ -295,6 +307,9 @@ function create_hub(options) {
         leave_all_rooms,
         leave_room,
         metrics: Object.freeze({
+            onClusterDropped: function () { metrics.onClusterDropped(); },
+            onClusterPublish: function (b) { metrics.onClusterPublish(b); },
+            onClusterReceived: function (b) { metrics.onClusterReceived(b); },
             onConnect: function () { metrics.onConnect(); },
             onDisconnect: function () { metrics.onDisconnect(); },
             onMessageDropped: function () { metrics.onMessageDropped(); },

@@ -294,7 +294,7 @@ test("Redis Adapter: Malformed envelope detection", function () {
 });
 
 // -----------------------------------------------------------------------------
-// 5. Custom Pluggable Adapter Conformance Test
+// 5. Custom Pluggable Adapter Conformance & Cluster Metrics
 // -----------------------------------------------------------------------------
 
 test("Custom Adapter: User-provided mock adapter integrates seamlessly", async function () {
@@ -345,6 +345,48 @@ test("Custom Adapter: User-provided mock adapter integrates seamlessly", async f
     assert.ok(presence.includes("c1"));
     assert.ok(presence.includes("user_mock_1"));
     assert.ok(presence.includes("user_mock_2"));
+});
+
+test("Hub: Cluster metrics tracking for publish and receive", async function () {
+    const metrics = create_in_memory_metrics();
+    let sub_cb = null;
+
+    const mock_adapter = Object.freeze({
+        add_presence: async function () {},
+        close: async function () {},
+        get_node_for_conn: async function () { return null; },
+        get_presence: async function () { return []; },
+        node_id: function () { return "mock-node"; },
+        publish: async function () {},
+        publish_direct: async function () {},
+        publish_direct_raw: async function () {},
+        publish_raw: async function () {},
+        register_node: async function () {},
+        remove_presence: async function () {},
+        subscribe: async function (cb) { sub_cb = cb; },
+        unregister_node: async function () {}
+    });
+
+    const hub = create_hub({ adapter: mock_adapter, metrics });
+    await hub.configure(mock_adapter, metrics);
+
+    const msg = create_message("news", "headline", "", "sender", "Cluster payload");
+    hub.broadcast_room(null, msg);
+
+    await new Promise(function (resolve) {
+        setTimeout(resolve, 50);
+    });
+
+    const stats1 = metrics.getStats();
+    assert.equal(stats1.cluster_published, 1);
+    assert.ok(stats1.bytes_cluster_published > 0);
+
+    const raw = msg.encode();
+    sub_cb("room:news", "other_node", raw);
+
+    const stats2 = metrics.getStats();
+    assert.equal(stats2.cluster_received, 1);
+    assert.equal(stats2.bytes_cluster_received, raw.length);
 });
 
 // -----------------------------------------------------------------------------

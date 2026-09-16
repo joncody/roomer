@@ -420,12 +420,19 @@ class Room(EventEmitter):
                 self._custom_events.discard(event_name)
         return self
 
-    def force_close(self, is_disconnect: bool = False) -> Room:
-        """Closes the room locally and clears tracked state."""
+    def force_close(
+        self,
+        is_disconnect: bool = False,
+        code: int | None = None,
+        reason: str | None = None,
+    ) -> Room:
+        """Closes the room locally and clears tracked state with RFC status code and reason."""
+        close_code = code if code is not None else 1000
+        close_reason = reason if reason is not None else ""
         if self._is_open:
             self._is_open = False
             self._members.clear()
-            self.emit("close")
+            self.emit("close", close_code, close_reason)
         if not is_disconnect:
             self._member_id = ""
             if self._remove_room is not None:
@@ -454,7 +461,7 @@ class Room(EventEmitter):
                     self.emit("new_member", member_id)
 
             case "leave_ack":
-                self.emit("close")
+                self.emit("close", 1000, "Left room")
                 self._is_open = False
                 self._members.clear()
                 self._member_id = ""
@@ -490,6 +497,7 @@ class RoomerClient:
         initial_delay: float = 0.5,
         max_delay: float = 5.0,
         backoff_factor: float = 1.5,
+        should_reconnect: Callable[[int, str], bool] | None = None,
         **ws_kwargs: Any,
     ) -> None:
         if not isinstance(url, str):
@@ -500,6 +508,7 @@ class RoomerClient:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
         self.backoff_factor = backoff_factor
+        self.should_reconnect = should_reconnect or self._default_should_reconnect
         self.ws_kwargs = ws_kwargs
 
         self._rooms: dict[str, Room] = {}
@@ -512,6 +521,13 @@ class RoomerClient:
         self._queued_bytes: int = 0
 
         self._root = self.get_room("root")
+
+    @staticmethod
+    def _default_should_reconnect(code: int, _reason: str) -> bool:
+        """By default, suppress reconnection loops on clean exit, policy violation, or auth kicks."""
+        if code in (1000, 1008) or (4000 <= code < 5000):
+            return False
+        return True
 
     @property
     def root(self) -> Room:
@@ -581,8 +597,8 @@ class RoomerClient:
             def rooms_map() -> dict[str, Room]:
                 return dict(self._rooms)
 
-            async def close() -> None:
-                await self.close()
+            async def close(code: int = 1000, reason: str = "Client closed") -> None:
+                await self.close(code=code, reason=reason)
 
             setattr(room, "purge", purge)
             setattr(room, "rooms", rooms_map)
@@ -637,6 +653,9 @@ class RoomerClient:
         """Background connection supervisor with ordered writer task, backoff, and jitter."""
         while self._running:
             writer_task: asyncio.Task[None] | None = None
+            close_code: int = 1006
+            close_reason: str = ""
+
             try:
                 async with websockets.connect(self.url, **self.ws_kwargs) as ws:
                     self._ws = ws
@@ -667,8 +686,22 @@ class RoomerClient:
                             if packet is not None and packet.room in self._rooms:
                                 self._rooms[packet.room].parse(packet)
 
-            except (websockets.exceptions.WebSocketException, OSError, asyncio.CancelledError):
-                pass
+                    close_code = getattr(ws, "close_code", 1000) or 1000
+                    close_reason = getattr(ws, "close_reason", "") or ""
+
+            except websockets.exceptions.ConnectionClosed as exc:
+                if getattr(exc, "rcvd", None):
+                    close_code = exc.rcvd.code
+                    close_reason = exc.rcvd.reason
+                elif getattr(exc, "sent", None):
+                    close_code = exc.sent.code
+                    close_reason = exc.sent.reason
+                else:
+                    close_code = 1006
+                    close_reason = str(exc)
+            except (websockets.exceptions.WebSocketException, OSError, asyncio.CancelledError) as exc:
+                close_code = 1006
+                close_reason = str(exc)
             finally:
                 if writer_task is not None:
                     writer_task.cancel()
@@ -678,11 +711,23 @@ class RoomerClient:
                         pass
                 self._ws = None
                 self._drain_send_queue()
-                is_reconnecting = self.reconnect and not self._manual_close and self._running
-                for r in list(self._rooms.values()):
-                    r.force_close(is_disconnect=is_reconnecting)
 
-            if not self.reconnect or self._manual_close or not self._running:
+                should_retry = self.should_reconnect(close_code, close_reason)
+                is_reconnecting = (
+                    self.reconnect
+                    and not self._manual_close
+                    and self._running
+                    and should_retry
+                )
+
+                for r in list(self._rooms.values()):
+                    r.force_close(
+                        is_disconnect=is_reconnecting,
+                        code=close_code,
+                        reason=close_reason,
+                    )
+
+            if not is_reconnecting:
                 self._running = False
                 break
 
@@ -690,14 +735,14 @@ class RoomerClient:
             await asyncio.sleep(self._reconnect_delay + jitter)
             self._reconnect_delay = min(self._reconnect_delay * self.backoff_factor, self.max_delay)
 
-    async def close(self) -> None:
-        """Gracefully closes all rooms and the WebSocket connection."""
+    async def close(self, code: int = 1000, reason: str = "Client closed") -> None:
+        """Gracefully closes all rooms and the WebSocket connection with explicit status code."""
         self._manual_close = True
         self._running = False
         self._drain_send_queue()
         if self._ws is not None and not getattr(self._ws, "closed", False):
             try:
-                await self._ws.close()
+                await self._ws.close(code=code, reason=reason)
             except Exception:
                 pass
         if self._task is not None:
@@ -707,7 +752,7 @@ class RoomerClient:
             except asyncio.CancelledError:
                 pass
         for r in list(self._rooms.values()):
-            r.force_close(is_disconnect=False)
+            r.force_close(is_disconnect=False, code=code, reason=reason)
         self._rooms.clear()
 
 

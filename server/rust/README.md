@@ -43,6 +43,32 @@ The `roomer` Rust crate provides an asynchronous, zero-cost WebSocket hub, conne
 
 ---
 
+## 🏁 Running the Standalone Demo & Test Server
+
+The crate includes an example server binary (`examples/server.rs`) serving the HTML/JS demo frontend, the automated browser test runner, and the WebSocket endpoint.
+
+### Run in Standalone In-Memory Mode
+```bash
+# Run from repository root:
+cargo run --manifest-path server/rust/Cargo.toml --example server
+
+# Or run from inside server/rust:
+cargo run --example server
+```
+
+### Run with Redis Cluster Adapter
+```bash
+# Set REDIS_URL and enable the redis-adapter feature:
+REDIS_URL=redis://127.0.0.1:6379 cargo run --example server --features redis-adapter
+```
+
+Once running, navigate to:
+* **Interactive Chat Demo:** [http://localhost:8080/](http://localhost:8080/)
+* **Automated Browser Test Suite:** [http://localhost:8080/tests/](http://localhost:8080/tests/)
+* **WebSocket Endpoint:** `ws://localhost:8080/ws`
+
+---
+
 ## 🧠 Quick Start
 
 ```rust

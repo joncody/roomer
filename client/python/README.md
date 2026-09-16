@@ -6,7 +6,7 @@
 [![Typing: Typed](https://img.shields.io/badge/Typing-PEP%20484%20%2F%20561-blue?style=flat)](https://peps.python.org/pep-0561/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../../LICENSE)
 
-High-performance, asynchronous Python client for the Roomer WebSocket framework with 12-byte zero-copy binary framing, automatic exponential reconnection with jitter, cluster-wide auto-expiring SET presence synchronization, and 100% wire protocol parity across Go, Rust, and Node.js servers.
+High-performance, asynchronous Python client for the Roomer WebSocket framework with 12-byte zero-copy binary framing, automatic exponential reconnection with jitter, RFC 6455 close status code introspection, cluster-wide auto-expiring SET presence synchronization, and 100% wire protocol parity across Go, Rust, and Node.js servers.
 
 > 📖 **For Wire Protocol specifications and Server documentation, see the [Root README](../../README.md).**
 
@@ -26,6 +26,7 @@ The `roomer-client` library provides an asynchronous, non-blocking interface for
                |               Roomer Client SDK                   |
                |  - asyncio / websockets async connection manager  |
                |  - Async / Sync Dual-Mode Event Emitter           |
+               |  - RFC Close Code Introspection & Filter          |
                +-------------------+-------------------+-----------+
                                    |                   |
                      +-------------v----+        +-----v-------------+
@@ -45,11 +46,11 @@ The `roomer-client` library provides an asynchronous, non-blocking interface for
 
 - **High-Performance 12-Byte Wire Framing**: Serializes and unpacks a 2-byte `[1B Version][1B Flags]` header and right-sized Big-Endian length prefixes via pre-allocated `bytearray` and zero-copy `struct.pack_into()` for maximum CPU efficiency.
 - **Client-Controllable Protocol Flags**: Control wire-level `flags` directly on `.send(..., flags=...)` for compression, encryption, or prioritization markers.
+- **RFC 6455 Close Status Code Introspection**: Dispatches `code` and `reason` directly to `@room.on("close") def on_close(code, reason): ...` so client code can distinguish between clean closures (`1000`), policy violations (`1008`), and authentication kicks (`4000`–`4999`).
+- **Intelligent Reconnection Filter**: By default, halts reconnect loops on fatal close codes (`1000`, `1008`, `4000`–`4999`), while recovering gracefully from network drops (`1006`). Can be customized using `should_reconnect=callable`.
 - **Dual-Mode Event Emitter**: Register event listeners as either standard synchronous functions (`def handler(...)`) or native coroutines (`async def handler(...)`).
 - **Async Context Manager**: Native `async with roomer("ws://...") as root:` pattern for deterministic lifecycle management and cleanup.
-- **Automatic Exponential Reconnection**: Recovers from abrupt socket disconnects with randomized jitter backoff while preserving active room subscriptions across reconnects.
-- **Cluster Presence Tracking**: Automatic handling of `join_ack` snapshots, `new_member` notifications, and `member_left` presence events.
-- **Flow Control & Backpressure**: Real-time `.ready_state`, `.buffered_amount`, and `.url` property inspection for backpressure regulation and connection discovery.
+- **Flow Control & Diagnostics**: Real-time `.ready_state`, `.buffered_amount`, and `.url` property inspection for backpressure regulation and endpoint verification.
 - **Direct 1-to-1 Point-to-Point Unicast**: Route messages directly to specific client UUIDs across cluster nodes with $O(1)$ efficiency.
 - **Custom Handshake & Auth Headers**: Supports passing `extra_headers` (e.g. Bearer authorization tokens) and SSL contexts directly into `websockets.connect`.
 
@@ -102,13 +103,9 @@ async def main():
         def on_chat(payload: bytes, sender_id: str):
             print(f"[{sender_id}]: {payload.decode('utf-8')}")
 
-        @lobby.on("new_member")
-        def on_new_member(member_id: str):
-            print(f"User joined lobby: {member_id}")
-
-        @lobby.on("member_left")
-        def on_member_left(member_id: str):
-            print(f"User left lobby: {member_id}")
+        @root.on("close")
+        def on_close(code=None, reason=None):
+            print(f"Connection closed by server: [{code}] {reason}")
 
         # Keep running
         await asyncio.Event().wait()
@@ -142,8 +139,8 @@ if __name__ == "__main__":
 | `room.once(event, listener)` | `Callable` | Subscribes a one-time event callback. |
 | `room.off(event, listener)` | `None` | Unsubscribes a registered listener callback. |
 | `room.clear_listeners(exceptions=None)` | `Room` | Clears custom listeners except those listed in `exceptions`. |
-| `room.force_close(is_disconnect=False)` | `Room` | Clears local member state and emits `"close"`. |
-| `root.close()` *(root only)* | `Coroutine` | Gracefully closes all rooms and the WebSocket connection. |
+| `room.force_close(is_disconnect=False, code=None, reason=None)` | `Room` | Clears local member state and emits `"close"` with status code and reason. |
+| `root.close(code=1000, reason="Client closed")` *(root only)* | `Coroutine` | Gracefully closes all rooms and the WebSocket connection with status code. |
 | `root.purge()` *(root only)* | `Room` | Unsubscribes from all non-root rooms simultaneously. |
 | `root.rooms()` *(root only)* | `dict[str, Room]` | Dictionary mapping of all active room handles. |
 
