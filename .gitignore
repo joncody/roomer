@@ -1,12 +1,19 @@
 # ==============================================================================
-# Operating System & IDE Files
+# 1. Environment & Secret Configuration
+# ==============================================================================
+.env
+.env.*
+!.env.example
+
+# ==============================================================================
+# 2. Operating System & Editor Metadata
 # ==============================================================================
 # macOS
 .DS_Store
-.DS_Store?
+.AppleDouble
+.LSOverride
+Icon?
 ._*
-.Spotlight-V100
-.Trashes
 
 # Windows
 Thumbs.db
@@ -14,129 +21,146 @@ Thumbs.db:encryptable
 ehthumbs.db
 ehthumbs_vista.db
 [Dd]esktop.ini
+$RECYCLE.BIN/
 
 # Linux
 *~
+.fuse_hidden*
+.directory
 
 # IDEs & Editors
 .idea/
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-*.sublime-workspace
+.vscode/
 *.sublime-project
+*.sublime-workspace
 *.swp
 *.swo
 *.swn
+*~
+*.patch
+*.diff
 
 # ==============================================================================
-# Rust (server/rust)
+# 3. Go Server Artifacts (server/go)
 # ==============================================================================
-# Build artifacts
-target/
-server/rust/target/
-
-# Backup & profile files
-**/*.rs.bk
-*.profraw
-*.profdata
-
-# ==============================================================================
-# Go (server/go)
-# ==============================================================================
-# Build outputs & binary directories
-bin/
-server/go/bin/
+# Compiled binaries & test runners
 server_bin
-
-# Compiled test and coverage binaries
+server/go/server_bin
+loadtest
+server/go/cmd/loadtest/loadtest
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
 *.test
+
+# Go test profiles & coverage
 *.out
 *.prof
-server/go/cover.out
+coverage.txt
+profile.out
 
-# Local execution binaries
-/server/go/cmd/loadtest/loadtest
-/server/go/examples/example
+# Go workspace files (for local overrides)
+go.work
+go.work.sum
 
 # ==============================================================================
-# Node.js & JavaScript (server/node, client)
+# 4. Rust Server Artifacts (server/rust)
 # ==============================================================================
-# Dependencies
+# Cargo build outputs
+target/
+server/rust/target/
+**/target/
+
+# Cargo backup and crash dumps
+**/*.rs.bk
+Cargo.lock.backup
+
+# ==============================================================================
+# 5. Node.js Server & Client Dependencies (server/node & client)
+# ==============================================================================
+# Node dependency directories
 node_modules/
 server/node/node_modules/
-
-# Build and distribution outputs
-dist/
-server/node/dist/
-build/
-
-# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# TypeScript cache
+# Node test & coverage output
+.nyc_output/
+coverage/
+
+# TypeScript build caches
 *.tsbuildinfo
 
 # ==============================================================================
-# Python (client/python)
+# 6. Python Client SDK Artifacts (client/python)
 # ==============================================================================
-# Bytecode and cache
-__pycache__/
-*.py[cod]
-*$py.class
-.mypy_cache/
-.ruff_cache/
-
 # Virtual environments
 .venv/
+client/python/.venv/
 venv/
 env/
 ENV/
-client/python/.venv/
-client/python/venv/
+
+# Python bytecode & cache
+__pycache__/
+client/python/**/__pycache__/
+*.py[cod]
+*$py.class
 
 # Packaging & distribution
-*.egg-info/
-*.egg
-client/python/*.egg-info/
-client/python/dist/
 client/python/build/
+client/python/dist/
+client/python/*.egg-info/
+*.egg
+build/
+dist/
+*.egg-info/
 
-# Testing & coverage
-.pytest_cache/
+# Pytest, coverage & typing caches
 client/python/.pytest_cache/
+.pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
 
 # ==============================================================================
-# Formal Verification (spec/ - TLA+)
+# 7. TLA+ Formal Verification Output (spec/)
 # ==============================================================================
-# TLA+ tools binary
+# Downloaded TLC model checker binary
 tla2tools.jar
 spec/tla2tools.jar
+**/tla2tools.jar
 
-# Model checker caches & states
-spec/*.tlacache
-spec/states/
-*.tlacache
+# TLC execution states, checkpoints & outputs
+MC.out
+MC.tla
+MC.cfg
+spec/MC.out
+spec/MC.tla
+spec/MC.cfg
 states/
-
-# TLC / Toolbox execution artifacts
-*.toolbox/
-spec/*.toolbox/
-MC.*
-spec/MC.*
+spec/states/
+**/states/
+*.tlacache/
 
 # ==============================================================================
-# Environment Variables & Local Configs
+# 8. Infrastructure & Docker
 # ==============================================================================
-.env
-.env.local
-.env.*.local
-*.local
+# Docker Compose local overrides
+docker-compose.override.yml
+
+# Redis local persistence dumps
+dump.rdb
+
+# General temp and log files
+*.log
+tmp/
+temp/
