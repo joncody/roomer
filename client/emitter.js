@@ -32,7 +32,7 @@
  * @returns {Readonly<EventEmitter>} The frozen event emitter instance.
  */
 function create_emitter(target) {
-    const events = Object.create(null);
+    const events = {};
     let self;
 
     /**
